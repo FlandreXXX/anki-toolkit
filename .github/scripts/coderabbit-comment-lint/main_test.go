@@ -337,6 +337,12 @@ func TestValidateCommentRejects(t *testing.T) {
 			line:   5,
 		},
 		{
+			name:   "уровень вне шкалы провайдера",
+			report: reportOf("| 1 · `aaaaaaa` | banana | `a.go` | эффект | confirmed | fix |"),
+			want:   "не-провайдерское значение",
+			line:   5,
+		},
+		{
 			name:   "тире в уровне не-clean строки",
 			report: reportOf("| 1 · `aaaaaaa` | — | `a.go` | эффект | confirmed | fix |"),
 			want:   "допустим только в clean-строке",

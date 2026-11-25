@@ -75,6 +75,7 @@ const (
 	emptyValue      = "—"
 	cleanDecision   = "clean"
 	decisionList    = "confirmed, partially confirmed, false positive, stale, duplicate, out of scope, unconfirmed, clean"
+	severityList    = "critical, major, minor, trivial, info, none"
 	tableColumns    = 6
 	apiHost         = "api.github.com"
 	apiBase         = "https://" + apiHost
@@ -92,8 +93,7 @@ const (
 // tableHeader — точный заголовок накопительной таблицы; порядок обязателен.
 var tableHeader = []string{"Итерация / reviewed HEAD", "Уровень", "Путь", "Влияние", "Решение", "Исправление"}
 
-// canonicalDecisions — канонические решения; шкала severity провайдера здесь не
-// фиксируется, поэтому «Уровень» принимает любое непустое значение.
+// canonicalDecisions — канонические решения.
 var canonicalDecisions = map[string]bool{
 	"confirmed":           true,
 	"partially confirmed": true,
@@ -103,6 +103,17 @@ var canonicalDecisions = map[string]bool{
 	"out of scope":        true,
 	"unconfirmed":         true,
 	cleanDecision:         true,
+}
+
+// canonicalSeverities — шкала severity провайдера без переименования: «Уровень»
+// принимает только эти значения, кроме clean-строки с «—».
+var canonicalSeverities = map[string]bool{
+	"critical": true,
+	"major":    true,
+	"minor":    true,
+	"trivial":  true,
+	"info":     true,
+	"none":     true,
 }
 
 var (
@@ -954,6 +965,10 @@ func checkRows(rows [][]string, lines []int) []string {
 				problems = append(problems, fmt.Sprintf(
 					"Строка %d: «%s» в уровне или пути допустим только в clean-строке",
 					lineNumber, emptyValue))
+			} else if !canonicalSeverities[cells[1]] {
+				problems = append(problems, fmt.Sprintf(
+					"Строка %d: столбец «Уровень» содержит не-провайдерское значение; допустимы: %s",
+					lineNumber, severityList))
 			}
 			if cleanIteration {
 				problems = append(problems, fmt.Sprintf(
