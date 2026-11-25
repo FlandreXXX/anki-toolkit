@@ -121,6 +121,27 @@ go test .github/scripts/coderabbit-comment-lint/main.go .github/scripts/coderabb
   линтера Markdown-ссылок здесь нет. Ссылки, на которые опирается задача,
   проверяются разрешением фактических целей в рабочей копии.
 
+## `.coderabbit.yaml`
+
+Конфигурация провайдера по схеме V3: `version: 3`. Проверяется официальной JSON
+Schema, а не CLI:
+
+```bash
+check-jsonschema --no-cache --schemafile https://www.coderabbit.ai/integrations/schema.v3.json .coderabbit.yaml
+```
+
+`0` — файл соответствует схеме; `1` — нарушение: в V3 неизвестные поля и опечатки
+отвергаются, включая вложенные объекты. Проверка требует установленного
+`check-jsonschema` и доступа к URL схемы; ненулевой код не доказывает сам по себе
+невалидность — различай ошибку файла, отсутствие инструмента и сетевую ошибку по
+выводу команды.
+
+`coderabbit config validate` для этого не используется: `coderabbit config` без
+подкоманды запускает guided setup и может записать файл, а `config apply`
+применяет предложение. Схема V3 — opt-in для GitHub Cloud; локальный CLI её не
+применяет, и настоящий эффект виден только в hosted-ревью. Синтаксическая
+валидность не доказывает, что hosted-ревью действительно запустится.
+
 ## CI: job `Структура PR`
 
 Единственный рабочий процесс — [`.github/workflows/pr-body.yml`](../../.github/workflows/pr-body.yml).
