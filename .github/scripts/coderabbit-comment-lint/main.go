@@ -3,7 +3,7 @@
 // Markdown, а в сетевом режиме — ещё и опубликованное состояние PR по GitHub API.
 //
 // Проверяется форма, а не правдивость содержания: линтер не доказывает, что
-// ревью действительно было, что findings приведены полно и что коммиты
+// ревью действительно было, что замечания приведены полно и что коммиты
 // существуют.
 //
 // # Документированное подмножество Markdown
@@ -12,7 +12,7 @@
 // всё, что выходит за этот список, считается сомнительной видимостью и даёт
 // диагностируемый отказ, а не догадку:
 //
-//   - fenced-блоки ``` и ~~~ (три и более символов) скрывают текст до
+//   - ограждённые блоки кода ``` и ~~~ (три и более символов) скрывают текст до
 //     согласованного закрытия: тот же символ и не короче открывающего, без
 //     строки информации. Блок, открытый в строке пункта списка или на
 //     последующей строке с отступом от начала его содержимого, скрывает текст
@@ -20,22 +20,32 @@
 //     ограждение скрывает остаток документа;
 //   - код с отступом от четырёх пробелов, отсчитанных от начала содержимого
 //     текущего пункта списка, скрыт;
-//   - HTML-комментарии <!-- … -->, включая незакрытые, скрывают текст; внутри
-//     code span и внутри fenced-блока литеральный «<!--» комментарий не
-//     открывает;
 //   - блок-цитата «>» скрыта;
-//   - raw HTML: <script>, <pre>, <style>, <textarea> скрывают текст до
-//     закрывающего тега, прочие блочные теги (<div> и подобные) — до пустой
-//     строки.
+//   - HTML-блоки GFM: <script>, <pre>, <style> и <textarea> скрывают текст до
+//     закрывающего тега (по стандарту его имя не обязано совпадать с
+//     открывающим); «<!--», «<?», «<![CDATA[» и «<!» с заглавной латинской
+//     буквой скрывают текст до «-->», «?>», «]]>» и «>» соответственно; прочие
+//     теги (<div> и подобные) — до пустой строки. Строка, открывшая HTML-блок,
+//     разметкой таблицы не является, и остаток строки после завершения блока
+//     тоже остаётся скрытым;
+//   - HTML-комментарий, открытый в середине видимой строки, скрывает остаток
+//     этой строки и следующие строки до «-->». Внутри строчного кода и внутри
+//     ограждённого блока литеральный «<!--» комментарий не открывает.
+//
+// Структура таблицы разбирается по исходной строке: по GFM границы ячеек
+// определяются раньше встроенной разметки. Поэтому HTML-комментарий внутри
+// строки таблицы не меняет число ячеек и не создаёт канонический заголовок или
+// значение удалением фрагмента исходного текста: лишняя неэкранированная черта
+// остаётся лишней чертой, а закомментированное содержимое ячейки пустым.
 //
 // Строка, которая началась внутри скрытого блока, считается скрытой целиком,
 // даже если блок закрывается на ней же: неоднозначный случай решается отказом.
 //
 // Полный CommonMark не реализуется. Вне подмножества остаются: определения
 // ссылок и сноски, заголовки setext, таблицы без строки-разделителя,
-// многоуровневые и перемежающиеся списки, блоки кода внутри цитаты, inline-HTML
-// и HTML-сущности внутри ячеек, а также любые конструкции, где видимость зависит
-// от вложенности контейнеров глубже одноуровневого пункта списка. Если такая
+// многоуровневые и перемежающиеся списки, блоки кода внутри цитаты, встроенный
+// HTML внутри ячеек, а также любые конструкции, где видимость зависит от
+// вложенности контейнеров глубже одноуровневого пункта списка. Если такая
 // конструкция делает видимость неоднозначной, линтер отказывает, а не угадывает:
 // маркер или заголовок, не попавший в видимый слой, даёт диагностику
 // «Отсутствует маркер» или «Отсутствует заголовок накопительной таблицы».
@@ -52,7 +62,6 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -70,12 +79,13 @@ const (
 	// по GFM является HTML-блоком целиком.
 	htmlCommentStart = "<!--"
 
+	// cdataStart открывает блок CDATA — отдельный вид HTML-блока GFM.
+	cdataStart = "<![CDATA["
+
 	// emptyValue заполняет «Уровень» и «Путь» в clean-строке и допустим только
 	// там.
 	emptyValue      = "—"
 	cleanDecision   = "clean"
-	decisionList    = "confirmed, partially confirmed, false positive, stale, duplicate, out of scope, unconfirmed, clean"
-	severityList    = "critical, major, minor, trivial, info, none"
 	tableColumns    = 6
 	apiHost         = "api.github.com"
 	apiBase         = "https://" + apiHost
@@ -93,27 +103,43 @@ const (
 // tableHeader — точный заголовок накопительной таблицы; порядок обязателен.
 var tableHeader = []string{"Итерация / reviewed HEAD", "Уровень", "Путь", "Влияние", "Решение", "Исправление"}
 
-// canonicalDecisions — канонические решения.
-var canonicalDecisions = map[string]bool{
-	"confirmed":           true,
-	"partially confirmed": true,
-	"false positive":      true,
-	"stale":               true,
-	"duplicate":           true,
-	"out of scope":        true,
-	"unconfirmed":         true,
-	cleanDecision:         true,
+// canonicalDecisions — канонические решения в порядке шкалы: единственный
+// источник и для проверки, и для диагностики.
+var canonicalDecisions = []string{
+	"confirmed",
+	"partially confirmed",
+	"false positive",
+	"stale",
+	"duplicate",
+	"out of scope",
+	"unconfirmed",
+	cleanDecision,
 }
 
-// canonicalSeverities — шкала severity провайдера без переименования: «Уровень»
-// принимает только эти значения, кроме clean-строки с «—».
-var canonicalSeverities = map[string]bool{
-	"critical": true,
-	"major":    true,
-	"minor":    true,
-	"trivial":  true,
-	"info":     true,
-	"none":     true,
+// canonicalSeverities — шкала уровня критичности провайдера без переименования: «Уровень»
+// принимает только эти значения, кроме clean-строки с «—». Тот же список служит
+// диагностикой.
+var canonicalSeverities = []string{"critical", "major", "minor", "trivial", "info", "none"}
+
+// decisionSet и severitySet — проверочные множества, построенные из тех же
+// списков: отдельной копии набора нет.
+var (
+	decisionSet = valueSet(canonicalDecisions)
+	severitySet = valueSet(canonicalSeverities)
+)
+
+// valueSet строит множество допустимых значений из упорядоченного списка.
+func valueSet(values []string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[value] = true
+	}
+	return set
+}
+
+// valueList печатает упорядоченный список допустимых значений для диагностики.
+func valueList(values []string) string {
+	return strings.Join(values, ", ")
 }
 
 var (
@@ -130,11 +156,24 @@ var (
 	hexSHA       = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	repositoryID = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 	linkItem     = regexp.MustCompile(`^\s*<([^<>]+)>\s*;\s*rel="([a-z]+)"\s*$`)
-	htmlTagStart = regexp.MustCompile(`^ {0,3}<(/?)([A-Za-z][A-Za-z0-9-]*)(\s|/?>)`)
+	// singleTag — одиночный полный тег, занимающий строку целиком (HTML-блок
+	// вида 7 по GFM): имя, необязательные атрибуты и закрывающая скобка.
+	singleTag = regexp.MustCompile(`^</?[A-Za-z][A-Za-z0-9-]*(\s[^<>]*)?/?>\s*$`)
 )
 
 // rawTextTags скрывают текст до своего закрывающего тега, а не до пустой строки.
-var rawTextTags = map[string]bool{"script": true, "pre": true, "style": true, "textarea": true}
+var rawTextTags = map[string]bool{"script": true, "pre": true, "textarea": true, "style": true}
+
+// htmlEndTags — закрывающие теги, завершающие блок raw-текста. По GFM имя
+// закрывающего тега не обязано совпадать с открывающим.
+var htmlEndTags = []string{"</script>", "</pre>", "</textarea>", "</style>"}
+
+// htmlBlockEnd — конечные строки остальных видов HTML-блока.
+var htmlBlockEnd = map[htmlKind]string{
+	htmlInstruction: "?>",
+	htmlDeclaration: ">",
+	htmlCData:       "]]>",
+}
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -162,11 +201,19 @@ func runEnv(args []string, stdout, stderr io.Writer, getenv func(string) string,
 	if flags.NArg() > 0 {
 		return usageError(stderr, "лишние позиционные аргументы")
 	}
+	// Режим устанавливается фактом передачи флага, а не значением пути: пустое
+	// значение — ошибка использования, и второй режим не подменяет первый.
+	given := map[string]bool{}
+	flags.Visit(func(item *flag.Flag) { given[item.Name] = true })
 	switch {
-	case *commentFile != "" && *eventFile != "":
+	case given["comment-file"] && given["event-file"]:
 		return usageError(stderr, "флаги --comment-file и --event-file взаимоисключающие")
-	case *commentFile == "" && *eventFile == "":
+	case !given["comment-file"] && !given["event-file"]:
 		return usageError(stderr, "нужен ровно один режим: --comment-file или --event-file")
+	case given["comment-file"] && *commentFile == "":
+		return usageError(stderr, "пустой --comment-file: нужен непустой путь")
+	case given["event-file"] && *eventFile == "":
+		return usageError(stderr, "пустой --event-file: нужен непустой путь")
 	}
 	if *commentFile != "" {
 		body, err := readTextFile(*commentFile)
@@ -193,7 +240,7 @@ func runEnv(args []string, stdout, stderr io.Writer, getenv func(string) string,
 	if found {
 		fmt.Fprintln(stdout, "Опубликованный комментарий CodeRabbit соответствует контракту")
 	} else {
-		fmt.Fprintln(stdout, "Служебный комментарий CodeRabbit не найден: Conversation прочитана полностью")
+		fmt.Fprintln(stdout, "Служебный комментарий CodeRabbit не найден: комментарии PR прочитаны полностью")
 	}
 	return 0
 }
@@ -229,7 +276,7 @@ func report(problems []string, stdout, stderr io.Writer) int {
 }
 
 // sanitize заменяет управляющие символы пробелом: данные недоверенного
-// комментария или события не должны формировать управляющие строки workflow.
+// комментария или события не должны формировать управляющие строки рабочего процесса.
 func sanitize(message string) string {
 	var builder strings.Builder
 	for _, char := range message {
@@ -293,7 +340,7 @@ func checkMarker(lines []string, view []visibleLine) []string {
 	// Скрытость проверяется первой: строка внутри скрытого блока уже не является
 	// отдельной видимой строкой, и сообщать об этом точнее.
 	if view[index].hidden {
-		return []string{"Маркер " + commentMarker + " скрыт внутри комментария, кода, цитаты или raw HTML"}
+		return []string{"Маркер " + commentMarker + " скрыт внутри комментария, кода, цитаты или необработанного HTML"}
 	}
 	if strings.TrimSpace(lines[index]) != commentMarker {
 		return []string{"Маркер " + commentMarker + " должен занимать отдельную строку"}
@@ -301,31 +348,47 @@ func checkMarker(lines []string, view []visibleLine) []string {
 	return nil
 }
 
-// visibleLine — результат разбора одной строки: видимый текст без
-// HTML-комментариев либо признак, что строка скрыта.
+// visibleLine — результат разбора одной строки: исходный текст видимой строки
+// либо признак, что строка скрыта. Для таблицы важен именно исходный текст:
+// по GFM границы ячеек определяются раньше разбора встроенной разметки, поэтому
+// HTML-комментарий внутри строки не может ни спрятать, ни создать границу.
 type visibleLine struct {
 	text   string
 	hidden bool
 }
 
-// fence описывает активный fenced-блок.
+// fence описывает активный ограждённый блок.
 type fence struct {
 	ch  byte // маркер ограждения: '`' или '~'
 	n   int  // длина маркера открытия
 	col int  // 0 — блок верхнего уровня; >0 — блок внутри пункта списка
 }
 
+// htmlKind — вид активного HTML-блока по GFM. Виды 1–5 завершаются своей
+// конечной строкой, виды 6 и 7 — пустой строкой.
+type htmlKind int
+
+const (
+	htmlNone        htmlKind = 0
+	htmlRawText     htmlKind = 1 // <script>, <pre>, <style>, <textarea>
+	htmlComment     htmlKind = 2 // <!--
+	htmlInstruction htmlKind = 3 // <?
+	htmlDeclaration htmlKind = 4 // <! и заглавная латинская буква
+	htmlCData       htmlKind = 5 // <![CDATA[
+	htmlBlockTag    htmlKind = 6 // известный блочный тег
+	htmlAnyTag      htmlKind = 7 // одиночный полный тег
+)
+
 // viewer отслеживает состояние видимости по строкам документа.
 type viewer struct {
-	fence     *fence
-	comment   bool
-	rawTag    string
-	htmlBlock bool
-	listCol   int
+	fence   *fence
+	comment bool
+	html    htmlKind
+	listCol int
 }
 
 // visibleLines размечает строки документа: скрытые блоки заменяются признаком
-// hidden, остальные получают видимый текст. Строка, начавшаяся внутри скрытого
+// hidden, остальные получают исходный текст. Строка, начавшаяся внутри скрытого
 // блока, считается скрытой целиком, даже если блок закрывается на ней же: так
 // неоднозначный случай решается отказом, а не догадкой.
 func visibleLines(lines []string) []visibleLine {
@@ -350,15 +413,9 @@ func (v *viewer) line(line string) visibleLine {
 		}
 		return visibleLine{hidden: true}
 	}
-	if v.rawTag != "" {
-		if closesRawTag(line, v.rawTag) {
-			v.rawTag = ""
-		}
-		return visibleLine{hidden: true}
-	}
-	if v.htmlBlock {
-		if blank(line) {
-			v.htmlBlock = false
+	if v.html != htmlNone {
+		if closesHTMLBlock(line, v.html) {
+			v.html = htmlNone
 		}
 		return visibleLine{hidden: true}
 	}
@@ -396,80 +453,125 @@ func (v *viewer) line(line string) visibleLine {
 	if quoted(line) {
 		return visibleLine{hidden: true}
 	}
-	if name, raw, ok := htmlBlockStart(line); ok {
-		if raw {
-			v.rawTag = name
-		} else {
-			v.htmlBlock = true
+	if kind := htmlBlockStart(line); kind != htmlNone {
+		if !closesHTMLBlock(line, kind) {
+			v.html = kind
+			return visibleLine{hidden: true}
+		}
+		// Блок из одной строки. Отдельный HTML-комментарий — допустимое место
+		// служебного маркера, поэтому строка остаётся пустой, но не разметкой
+		// таблицы; любой другой остаток строки — уже не Markdown.
+		if kind == htmlComment && strings.TrimSpace(stripComments(line, &v.comment)) == "" {
+			return visibleLine{}
 		}
 		return visibleLine{hidden: true}
 	}
-	// Строка, начинающаяся с HTML-комментария, по GFM образует HTML-блок
-	// (тип 2), который заканчивается на строке с «-->». Текст такой строки —
-	// уже не разметка таблицы, поэтому заголовок из неё не извлекается.
-	if strings.HasPrefix(strings.TrimLeft(line, " "), htmlCommentStart) {
-		rest := stripComments(line, &v.comment)
-		switch {
-		case v.comment:
-			// Комментарий не закрылся: скрыт остаток строки и следующие строки.
-			return visibleLine{hidden: true}
-		case strings.TrimSpace(rest) == "":
-			// Комментарий занимает строку целиком: это допустимое место
-			// служебного маркера, но не строка таблицы.
-			return visibleLine{text: ""}
-		default:
-			// После закрытия комментария остаток строки остаётся HTML-текстом.
-			return visibleLine{hidden: true}
-		}
-	}
-	text := stripComments(line, &v.comment)
-	return visibleLine{text: text}
+	// HTML-комментарий, открытый в середине видимой строки, не меняет её
+	// разметку: по GFM границы ячеек таблицы определяются раньше встроенной
+	// разметки. Учитывается только состояние комментария для следующих строк;
+	// содержимое комментария внутри ячейки скрывается при проверке непустоты.
+	stripComments(line, &v.comment)
+	return visibleLine{text: line}
 }
 
-// htmlBlockStart распознаёт начало блока raw HTML. Второй результат — тег из
-// rawTextTags, который скрывает текст до своего закрытия, третий — что строка
-// вообще открывает HTML-блок.
-func htmlBlockStart(line string) (string, bool, bool) {
-	match := htmlTagStart.FindStringSubmatch(line)
-	if match == nil {
-		return "", false, false
-	}
-	name := strings.ToLower(match[2])
-	if rawTextTags[name] && match[1] == "" {
-		if !closesRawTag(line, name) {
-			return name, true, true
-		}
-	}
-	return name, false, true
+// blockTags — имена тегов, открывающих HTML-блок вида 6 по GFM.
+var blockTags = []string{
+	"address", "article", "aside", "base", "basefont", "blockquote", "body",
+	"caption", "center", "col", "colgroup", "dd", "details", "dialog", "dir",
+	"div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form",
+	"frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header",
+	"hr", "html", "iframe", "legend", "li", "link", "main", "menu", "menuitem",
+	"nav", "noframes", "ol", "optgroup", "option", "p", "param", "section",
+	"summary", "table", "tbody", "td", "tfoot", "th", "thead", "title", "tr",
+	"track", "ul",
 }
 
-// closesRawTag сообщает, что в строке есть закрывающий тег raw-блока. Тег
-// сверяется целиком: «</prefix>» не закрывает «<pre>», иначе текст после него
-// ошибочно считался бы видимым.
-func closesRawTag(line, name string) bool {
-	lower := strings.ToLower(line)
-	closing := "</" + name
-	for from := 0; ; {
-		index := strings.Index(lower[from:], closing)
-		if index < 0 {
-			return false
+// htmlBlockStart распознаёт строку, открывающую HTML-блок GFM; ноль — строка
+// HTML-блок не открывает. Учитывается не более трёх пробелов отступа.
+func htmlBlockStart(line string) htmlKind {
+	pad := leadingSpaces(line)
+	if pad > 3 {
+		return htmlNone
+	}
+	rest := line[pad:]
+	lower := strings.ToLower(rest)
+	for tag := range rawTextTags {
+		if hasTagPrefix(lower, "<"+tag, false) {
+			return htmlRawText
 		}
-		end := from + index + len(closing)
-		// Имя тега заканчивается пробелом, «>» или «/»: иначе это другой тег.
-		if end < len(lower) {
-			switch lower[end] {
-			case ' ', '\t', '>', '/', '\r', '\n':
+	}
+	switch {
+	case strings.HasPrefix(rest, cdataStart):
+		return htmlCData
+	case strings.HasPrefix(rest, "<?"):
+		return htmlInstruction
+	case !strings.HasPrefix(rest, htmlCommentStart) && startsDeclaration(rest):
+		return htmlDeclaration
+	case strings.HasPrefix(rest, htmlCommentStart):
+		return htmlComment
+	}
+	for _, tag := range blockTags {
+		if hasTagPrefix(lower, "<"+tag, true) || hasTagPrefix(lower, "</"+tag, true) {
+			return htmlBlockTag
+		}
+	}
+	if singleTag.MatchString(rest) {
+		return htmlAnyTag
+	}
+	return htmlNone
+}
+
+// startsDeclaration сообщает, что строка открывает объявление GFM: «<!» и
+// заглавная латинская буква.
+func startsDeclaration(rest string) bool {
+	return len(rest) > 2 && rest[0] == '<' && rest[1] == '!' && rest[2] >= 'A' && rest[2] <= 'Z'
+}
+
+// hasTagPrefix сообщает, что текст начинается с имени тега и за именем сразу
+// идёт допустимый разделитель: пробел, табуляция, конец строки или «>». Форма
+// «/>» допустима только для блочных тегов, а не для raw-текста. Так «<pre» не
+// путается с «<prefix>».
+func hasTagPrefix(lower, prefix string, selfClosing bool) bool {
+	if !strings.HasPrefix(lower, prefix) {
+		return false
+	}
+	tail := lower[len(prefix):]
+	if tail == "" {
+		return true
+	}
+	switch tail[0] {
+	case ' ', '\t', '>':
+		return true
+	case '/':
+		return selfClosing && len(tail) > 1 && tail[1] == '>'
+	}
+	return false
+}
+
+// closesHTMLBlock сообщает, что строка удовлетворяет конечному условию блока.
+func closesHTMLBlock(line string, kind htmlKind) bool {
+	switch kind {
+	case htmlRawText:
+		lower := strings.ToLower(line)
+		for _, tag := range htmlEndTags {
+			if strings.Contains(lower, tag) {
 				return true
 			}
 		}
-		from = end
+		return false
+	case htmlBlockTag, htmlAnyTag:
+		return blank(line)
+	case htmlComment:
+		return strings.Contains(line, "-->")
 	}
+	end, ok := htmlBlockEnd[kind]
+	return ok && strings.Contains(line, end)
 }
 
 // stripComments убирает HTML-комментарии, включая многострочные и незакрытые:
 // незакрытый комментарий скрывает остаток строки и следующие строки. Строчный
 // код в обратных кавычках — литеральный контекст: «<!--» внутри него
-// комментарий не открывает. Вызывается вне fenced-блоков и блоков кода с
+// комментарий не открывает. Вызывается вне ограждённых блоков кода и блоков с
 // отступом, поэтому маркер в коде остаётся литералом.
 func stripComments(line string, inside *bool) string {
 	var visible strings.Builder
@@ -788,11 +890,8 @@ func startsNewBlock(text string) bool {
 	if _, ok := listItemContent(trimmed); ok {
 		return true
 	}
-	// Начало raw-HTML-блока или одиночный HTML-тег.
-	if _, _, ok := htmlBlockStart(trimmed); ok {
-		return true
-	}
-	return strings.HasPrefix(trimmed, htmlCommentStart)
+	// Начало HTML-блока любого вида.
+	return htmlBlockStart(trimmed) != htmlNone
 }
 
 // checkTable проверяет состав таблицы: единственный точный заголовок, следующий
@@ -944,10 +1043,10 @@ func checkRows(rows [][]string, lines []int) []string {
 		iterationRows++
 		decision := cells[4]
 		switch {
-		case !canonicalDecisions[decision]:
+		case !decisionSet[decision]:
 			problems = append(problems, fmt.Sprintf(
 				"Строка %d: столбец «Решение» содержит неканоническое значение; допустимы: %s",
-				lineNumber, decisionList))
+				lineNumber, valueList(canonicalDecisions)))
 		case decision == cleanDecision:
 			cleanIteration = true
 			if cells[1] != emptyValue || cells[2] != emptyValue {
@@ -957,7 +1056,7 @@ func checkRows(rows [][]string, lines []int) []string {
 			}
 			if iterationRows > 1 {
 				problems = append(problems, fmt.Sprintf(
-					"Строка %d: clean не может сочетаться со строками findings одной итерации",
+					"Строка %d: clean не может сочетаться со строками замечаний одной итерации",
 					lineNumber))
 			}
 		default:
@@ -965,14 +1064,14 @@ func checkRows(rows [][]string, lines []int) []string {
 				problems = append(problems, fmt.Sprintf(
 					"Строка %d: «%s» в уровне или пути допустим только в clean-строке",
 					lineNumber, emptyValue))
-			} else if !canonicalSeverities[cells[1]] {
+			} else if !severitySet[cells[1]] {
 				problems = append(problems, fmt.Sprintf(
 					"Строка %d: столбец «Уровень» содержит не-провайдерское значение; допустимы: %s",
-					lineNumber, severityList))
+					lineNumber, valueList(canonicalSeverities)))
 			}
 			if cleanIteration {
 				problems = append(problems, fmt.Sprintf(
-					"Строка %d: clean не может сочетаться со строками findings одной итерации",
+					"Строка %d: clean не может сочетаться со строками замечаний одной итерации",
 					lineNumber))
 			}
 		}
@@ -981,11 +1080,24 @@ func checkRows(rows [][]string, lines []int) []string {
 }
 
 func emptyCell(cells []string) bool {
-	return slices.Contains(cells, "")
+	for _, cell := range cells {
+		if visibleCell(cell) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// visibleCell возвращает отображаемое содержимое ячейки: границы ячеек уже
+// определены по исходной строке, поэтому HTML-комментарий может только скрывать
+// содержимое, но не создавать ячейку и не делать её непустой.
+func visibleCell(cell string) string {
+	inside := false
+	return strings.TrimSpace(stripComments(cell, &inside))
 }
 
 // apiClient выполняет только GET к api.github.com. Транспорт и задержки
-// подменяются тестами; защита от redirect и пределы остаются в клиенте.
+// подменяются тестами; защита от перенаправления и пределы остаются в клиенте.
 type apiClient struct {
 	token string
 	http  *http.Client
@@ -1001,7 +1113,7 @@ func newAPIClient(token string, transport http.RoundTripper) *apiClient {
 		http: &http.Client{
 			Transport: transport,
 			Timeout:   requestTimeout,
-			// Ни один redirect не выполняется: токен не уходит на другой адрес.
+			// Ни одно перенаправление не выполняется: токен не уходит на другой адрес.
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -1089,11 +1201,15 @@ type pullSnapshot struct {
 	HeadRef     string
 	BaseSHA     string
 	BaseRef     string
+	// BaseRepoID — числовой идентификатор репозитория назначения. Ноль —
+	// метаданные его не содержат, и тогда каноническая ссылка пагинации
+	// отвергается: принадлежность подтвердить нечем.
+	BaseRepoID  int64
 	Body        string
 	BodyPresent bool
 }
 
-// issueComment — запись Conversation; отсутствие автора допускается только у
+// issueComment — запись комментариев PR; отсутствие автора допускается только у
 // немаркированного сообщения.
 type issueComment struct {
 	ID      int64
@@ -1102,7 +1218,7 @@ type issueComment struct {
 	HasUser bool
 }
 
-// checkPublished выполняет read-only сверку опубликованного состояния: PR,
+// checkPublished выполняет сверку опубликованного состояния только на чтение: PR,
 // полная выдача комментариев и повторное чтение PR. Третий результат сообщает,
 // что служебный комментарий найден и проверен.
 func checkPublished(getenv func(string) string, client *apiClient, event eventSnapshot) ([]string, bool, error) {
@@ -1131,7 +1247,7 @@ func checkPublished(getenv func(string) string, client *apiClient, event eventSn
 	if first.HeadSHA != event.HeadSHA {
 		return nil, false, errors.New("HEAD PR изменился после события: нужна новая проверка")
 	}
-	comments, err := client.listComments(repository, event.Number)
+	comments, err := client.listComments(repository, event.Number, first.BaseRepoID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1172,7 +1288,7 @@ func parsePull(data []byte) (pullSnapshot, error) {
 		return snapshot, errors.New("некорректный автор PR из GitHub API")
 	}
 	if snapshot.AuthorID, err = positiveID(user["id"]); err != nil {
-		return snapshot, errors.New("некорректный numeric ID автора PR из GitHub API")
+		return snapshot, errors.New("некорректный числовой идентификатор автора PR из GitHub API")
 	}
 	if snapshot.AuthorLogin, err = nonEmptyString(user, "login"); err != nil {
 		return snapshot, errors.New("некорректный логин автора PR из GitHub API")
@@ -1191,6 +1307,14 @@ func parsePull(data []byte) (pullSnapshot, error) {
 	if err != nil {
 		return snapshot, errors.New("некорректный base PR из GitHub API")
 	}
+	// base.repo — репозиторий назначения. Его идентификатор подтверждает
+	// принадлежность канонической ссылки пагинации; отсутствие поля не ошибка,
+	// но каноническая ссылка тогда не принимается.
+	if repo, repoErr := jsonObjectField(base, "repo"); repoErr == nil {
+		if id, idErr := positiveID(repo["id"]); idErr == nil {
+			snapshot.BaseRepoID = id
+		}
+	}
 	if snapshot.BaseSHA, err = fullSHAField(base, "sha"); err != nil {
 		return snapshot, errors.New("некорректный base SHA PR из GitHub API")
 	}
@@ -1204,8 +1328,9 @@ func parsePull(data []byte) (pullSnapshot, error) {
 }
 
 // listComments читает полную постраничную выдачу комментариев, проверяя записи,
-// повторы ID и заголовок Link.
-func (c *apiClient) listComments(repository string, number int64) ([]issueComment, error) {
+// повторы ID и заголовок Link. repositoryID — числовой идентификатор
+// репозитория назначения: он нужен для сверки канонической ссылки пагинации.
+func (c *apiClient) listComments(repository string, number, repositoryID int64) ([]issueComment, error) {
 	path := fmt.Sprintf("/repos/%s/issues/%d/comments", repository, number)
 	page := 1
 	seen := make(map[int64]bool)
@@ -1233,7 +1358,7 @@ func (c *apiClient) listComments(repository string, number int64) ([]issueCommen
 			seen[comment.ID] = true
 			comments = append(comments, comment)
 		}
-		next, err := nextPage(response.link, path, number, page)
+		next, err := nextPage(response.link, path, number, repositoryID, page)
 		if err != nil {
 			return nil, err
 		}
@@ -1254,7 +1379,7 @@ func (c *apiClient) listComments(repository string, number int64) ([]issueCommen
 	}
 }
 
-// parseComment разбирает запись Conversation: положительный numeric ID,
+// parseComment разбирает запись комментария: положительный числовой идентификатор,
 // строковое тело и необязательного автора.
 func parseComment(data []byte) (issueComment, error) {
 	var comment issueComment
@@ -1281,7 +1406,7 @@ func parseComment(data []byte) (issueComment, error) {
 }
 
 // validateComments определяет кандидатов по тексту маркера, включая скрытый и
-// неправильно размещённый, и проверяет авторство по numeric ID.
+// неправильно размещённый, и проверяет авторство по числовому идентификатору.
 func validateComments(comments []issueComment, authorID int64) ([]string, bool) {
 	var marked []issueComment
 	for _, comment := range comments {
@@ -1306,8 +1431,9 @@ func validateComments(comments []issueComment, authorID int64) ([]string, bool) 
 
 // nextPage проверяет заголовок пагинации и возвращает номер следующей страницы.
 // Ноль — продолжения нет. Следующий запрос строится из доверенного path, а не
-// из адреса ответа.
-func nextPage(link, path string, number int64, page int) (int, error) {
+// из адреса ответа. repositoryID — идентификатор репозитория назначения:
+// каноническая ссылка принимается только при его точном совпадении.
+func nextPage(link, path string, number, repositoryID int64, page int) (int, error) {
 	if strings.TrimSpace(link) == "" {
 		return 0, nil
 	}
@@ -1333,7 +1459,7 @@ func nextPage(link, path string, number int64, page int) (int, error) {
 	if parsed.Scheme != "https" || parsed.Host != apiHost || parsed.User != nil || parsed.Fragment != "" {
 		return 0, errors.New("недопустимая ссылка следующей страницы")
 	}
-	if parsed.Path != path && !canonicalPath(parsed.Path, number) {
+	if parsed.Path != path && !canonicalPath(parsed.Path, number, repositoryID) {
 		return 0, errors.New("недопустимая ссылка следующей страницы")
 	}
 	query, err := url.ParseQuery(parsed.RawQuery)
@@ -1350,8 +1476,14 @@ func nextPage(link, path string, number int64, page int) (int, error) {
 }
 
 // canonicalPath принимает каноническую ссылку /repositories/{id}/… для того же
-// PR: GitHub иногда возвращает её вместо /repos/{owner}/{repo}/….
-func canonicalPath(path string, number int64) bool {
+// PR: GitHub иногда возвращает её вместо /repos/{owner}/{repo}/…. Идентификатор
+// репозитория сверяется по значению, а не только по форме: ссылка на чужой
+// ресурс не подтверждает полноту чтения. Если достоверного идентификатора нет,
+// каноническая ссылка отвергается.
+func canonicalPath(path string, number, repositoryID int64) bool {
+	if repositoryID <= 0 {
+		return false
+	}
 	prefix := "/repositories/"
 	suffix := "/issues/" + strconv.FormatInt(number, 10) + "/comments"
 	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
@@ -1361,12 +1493,11 @@ func canonicalPath(path string, number int64) bool {
 	if id == "" || strings.ContainsAny(id, "/") {
 		return false
 	}
-	for _, char := range id {
-		if char < '0' || char > '9' {
-			return false
-		}
+	value, err := strconv.ParseInt(id, 10, 64)
+	if err != nil || value != repositoryID {
+		return false
 	}
-	return id[0] != '0'
+	return true
 }
 
 // eventSnapshot — минимальный проверенный снимок события pull_request.

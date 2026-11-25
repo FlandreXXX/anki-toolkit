@@ -47,6 +47,75 @@ func TestContractReferenceIsIndependent(t *testing.T) {
 	}
 }
 
+// TestValueListsMatchReference — эталон допустимых значений независим, а
+// проверочное множество и диагностика строятся из одного источника: изменение
+// списка не может оставить неверной подсказку и не может разойтись с проверкой.
+func TestValueListsMatchReference(t *testing.T) {
+	wantDecisions := []string{
+		"confirmed", "partially confirmed", "false positive", "stale", "duplicate",
+		"out of scope", "unconfirmed", "clean",
+	}
+	if !slices.Equal(canonicalDecisions, wantDecisions) {
+		t.Fatalf("набор решений изменился: %q, эталон тестов %q", canonicalDecisions, wantDecisions)
+	}
+	wantSeverities := []string{"critical", "major", "minor", "trivial", "info", "none"}
+	if !slices.Equal(canonicalSeverities, wantSeverities) {
+		t.Fatalf("шкала уровней изменилась: %q, эталон тестов %q", canonicalSeverities, wantSeverities)
+	}
+	for _, value := range wantDecisions {
+		if !decisionSet[value] {
+			t.Fatalf("решение %q отсутствует в проверочном множестве", value)
+		}
+	}
+	for _, value := range wantSeverities {
+		if !severitySet[value] {
+			t.Fatalf("уровень %q отсутствует в проверочном множестве", value)
+		}
+	}
+	// Диагностика — полный детерминированный перечень из того же источника.
+	if got := valueList(canonicalDecisions); got != strings.Join(wantDecisions, ", ") {
+		t.Fatalf("перечень решений в диагностике %q, ожидался %q", got, strings.Join(wantDecisions, ", "))
+	}
+	if got := valueList(canonicalSeverities); got != strings.Join(wantSeverities, ", ") {
+		t.Fatalf("перечень уровней в диагностике %q, ожидался %q", got, strings.Join(wantSeverities, ", "))
+	}
+}
+
+// TestValueListInDiagnostics — недопустимое значение отклоняется, а диагностика
+// содержит полный перечень допустимых: подсказка не может сузиться до одного
+// значения или разойтись с проверкой.
+func TestValueListInDiagnostics(t *testing.T) {
+	cases := map[string]struct {
+		report      string
+		wantList    []string
+		wantMessage string
+	}{
+		"решение": {
+			report:      reportOf("| 1 · `aaaaaaa` | major | `a.go` | эффект | fixed | fix |"),
+			wantList:    canonicalDecisions,
+			wantMessage: "неканоническое значение",
+		},
+		"уровень": {
+			report:      reportOf("| 1 · `aaaaaaa` | banana | `a.go` | эффект | confirmed | fix |"),
+			wantList:    canonicalSeverities,
+			wantMessage: "не-провайдерское значение",
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			joined := strings.Join(validateComment(c.report), "\n")
+			if !strings.Contains(joined, c.wantMessage) {
+				t.Fatalf("нет целевой диагностики %q: %q", c.wantMessage, joined)
+			}
+			for _, value := range c.wantList {
+				if !strings.Contains(joined, value) {
+					t.Fatalf("в диагностике нет допустимого значения %q: %q", value, joined)
+				}
+			}
+		})
+	}
+}
+
 func TestValidateCommentAccepts(t *testing.T) {
 	secondIteration := "| 2 · `abcdef1` | minor | `src/b.go` | шум | false positive | не правим |"
 	sameIteration := "| 1 · `aaaaaaa` | trivial | `src/c.go` | стиль | out of scope | отдельная задача |"
@@ -55,9 +124,9 @@ func TestValidateCommentAccepts(t *testing.T) {
 		report string
 	}{
 		{name: "clean-итерация", report: validReport()},
-		{name: "несколько findings одной итерации", report: reportOf(testFinding, sameIteration)},
+		{name: "несколько замечаний одной итерации", report: reportOf(testFinding, sameIteration)},
 		{name: "несколько итераций", report: reportOf(testFinding, secondIteration)},
-		{name: "clean после findings", report: reportOf(testFinding, "| 2 · `abcdef1` | — | — | 0 замечаний | clean | `ccccccc` |")},
+		{name: "clean после замечаний", report: reportOf(testFinding, "| 2 · `abcdef1` | — | — | 0 замечаний | clean | `ccccccc` |")},
 		{
 			name:   "внешние вертикальные черты",
 			report: reportOf("|1 · `aaaaaaa`|major|`a.go`|эффект|confirmed|fix|"),
@@ -75,7 +144,7 @@ func TestValidateCommentAccepts(t *testing.T) {
 			report: reportOf("| 1 · `aaaaaaa` | minor | `a.go` | разметка `a\\|b` | false positive | — |"),
 		},
 		{
-			name:   "экранирование в code span",
+			name:   "экранирование в строчном коде",
 			report: reportOf("| 1 · `aaaaaaa` | minor | `a\\|b.md` | разметка | false positive | — |"),
 		},
 		{
@@ -95,7 +164,7 @@ func TestValidateCommentAccepts(t *testing.T) {
 			report: reportOf(testFinding) + "\nКоманда: a | b\n",
 		},
 		{
-			name:   "проза с разделителем в code span после таблицы",
+			name:   "проза с разделителем в строчном коде после таблицы",
 			report: reportOf(testFinding) + "\nИтог: см. `a|b`\n",
 		},
 		{
@@ -153,7 +222,7 @@ func TestValidateCommentRejects(t *testing.T) {
 			want:   "должен занимать отдельную строку",
 		},
 		{
-			name:   "маркер в code span",
+			name:   "маркер в строчном коде",
 			report: "`" + testMarker + "`\n" + reportOf(testFinding)[len(testMarker)+1:],
 			want:   "должен занимать отдельную строку",
 		},
@@ -183,7 +252,7 @@ func TestValidateCommentRejects(t *testing.T) {
 			want:   "скрыт",
 		},
 		{
-			name:   "маркер в raw HTML",
+			name:   "маркер в необработанном HTML",
 			report: "<div>\n" + testMarker + "\n</div>\n\n" + reportOf(testFinding)[len(testMarker)+1:],
 			want:   "скрыт",
 		},
@@ -203,7 +272,7 @@ func TestValidateCommentRejects(t *testing.T) {
 			want:   "Отсутствует заголовок накопительной таблицы",
 		},
 		{
-			name:   "таблица в raw HTML",
+			name:   "таблица в необработанном HTML",
 			report: testMarker + "\n<div>\n" + strings.Join([]string{testHeader, testDelimiter, testCleanRow}, "\n") + "\n</div>\n",
 			want:   "Отсутствует заголовок накопительной таблицы",
 		},
@@ -432,14 +501,14 @@ func TestValidateCommentRejects(t *testing.T) {
 }
 
 // TestLiteralCommentMarker — регрессия: литеральный «<!--» в строчном коде,
-// в fenced-блоке и в блоке кода с отступом не открывает HTML-комментарий и не
+// в ограждённом блоке и в блоке кода с отступом не открывает HTML-комментарий и не
 // скрывает настоящий отчёт, который идёт следом.
 func TestLiteralCommentMarker(t *testing.T) {
 	target := testMarker + "\n\n" + testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
 	cases := map[string]string{
 		"строчный код":                 "Пример `<!--` в тексте описания.\n\n" + target,
 		"строчный код из двух кавычек": "Пример ``<!--`` в тексте описания.\n\n" + target,
-		"fenced-блок":                  "```markdown\n<!-- пример\n```\n\n" + target,
+		"ограждённый блок":             "```markdown\n<!-- пример\n```\n\n" + target,
 		"строка информации блока":      "```text <!--\nпример\n```\n\n" + target,
 		"код с отступом":               "Пример разметки:\n\n    <!-- литеральный маркер\n\n" + target,
 		"маркер в коде пункта списка":  "- пример\n\n  ```text\n  <!-- литеральный маркер\n  ```\n\n" + target,
@@ -468,7 +537,7 @@ func TestEscapedPipe(t *testing.T) {
 	}{
 		{name: "экранированная черта внутри текста", row: "| 1 · `aaaaaaa` | minor | `a.go` | a\\|b | confirmed | fix |", want: 6},
 		{name: "две обратные черты перед чертой", row: "| 1 · `aaaaaaa` | minor | `a.go` | a\\\\|b | confirmed | fix |", want: 7},
-		{name: "экранированная черта в code span", row: "| 1 · `aaaaaaa` | minor | `a\\|b.go` | эффект | confirmed | fix |", want: 6},
+		{name: "экранированная черта в строчном коде", row: "| 1 · `aaaaaaa` | minor | `a\\|b.go` | эффект | confirmed | fix |", want: 6},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -536,18 +605,124 @@ func TestHeaderInsideHTMLBlock(t *testing.T) {
 }
 
 // TestClosingRawTagWholeName — регрессия: «</prefix>» не закрывает «<pre>»,
-// иначе скрытый блок заканчивается раньше времени.
+// иначе скрытый блок заканчивается раньше времени. Незавершённое имя
+// («</pre », «</pre/») тоже не является закрывающим тегом: по GFM закрытием
+// служит «</pre>», а не любой текст, начинающийся с имени.
 func TestClosingRawTagWholeName(t *testing.T) {
-	report := testMarker + "\n<pre>\nстрока </prefix>\n\n" +
-		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
-	if got := validateComment(report); len(got) == 0 {
-		t.Fatal("неверный закрывающий тег завершил raw-блок")
+	hidden := func(body string) string {
+		return testMarker + "\n<pre>\n" + body + "\n\n" +
+			testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
 	}
-	// Настоящий закрывающий тег блок действительно закрывает.
-	closed := testMarker + "\n<pre>\nкод\n</pre>\n\n" +
-		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
-	if got := validateComment(closed); len(got) != 0 {
-		t.Fatalf("настоящий </pre> не закрыл блок: %q", got)
+	for name, body := range map[string]string{
+		"чужое имя":          "строка </prefix>",
+		"незавершённое имя":  "строка </pre ",
+		"косая черта вместо": "строка </pre/",
+		"незакрытый тег":     "строка </pre",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := validateComment(hidden(body)); len(got) == 0 {
+				t.Fatal("неверный закрывающий тег завершил raw-блок")
+			}
+		})
+	}
+	// Настоящий закрывающий тег блок действительно закрывает, в любом регистре.
+	for name, closing := range map[string]string{
+		"строчными":  "</pre>",
+		"заглавными": "</PRE>",
+		"с хвостом":  "</pre></div>",
+	} {
+		t.Run("настоящий "+name, func(t *testing.T) {
+			closed := testMarker + "\n<pre>\nкод\n" + closing + "\n\n" +
+				testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+			if got := validateComment(closed); len(got) != 0 {
+				t.Fatalf("настоящий %s не закрыл блок: %q", closing, got)
+			}
+		})
+	}
+}
+
+// TestHTMLBlockKinds — регрессия: таблица внутри CDATA, инструкции обработки и
+// объявления не принимается за обычный Markdown, а корректно завершённый блок
+// не мешает отдельной допустимой таблице после него.
+func TestHTMLBlockKinds(t *testing.T) {
+	table := testHeader + "\n" + testDelimiter + "\n" + testFinding
+	hidden := map[string]string{
+		"CDATA": testMarker + "\n<![CDATA[\n" + table + "\n]]>\n",
+		"инструкция обработки": testMarker + "\n<?php\n" + table + "\n?>\n",
+		"объявление":           testMarker + "\n<!DOCTYPE\n" + table + "\n>\n",
+		"незакрытый CDATA":     testMarker + "\n<![CDATA[\n" + table + "\n",
+	}
+	for name, report := range hidden {
+		t.Run(name, func(t *testing.T) {
+			problems := validateComment(report)
+			if len(problems) == 0 {
+				t.Fatal("таблица скрытого HTML-блока принята за видимую")
+			}
+			if !strings.Contains(strings.Join(problems, "\n"), "заголовок") {
+				t.Fatalf("отказ по другой причине: %q", problems)
+			}
+		})
+	}
+	// Корректно завершённый блок и отдельная таблица после него допустимы, и
+	// скрытые строки блока не засчитываются как строки отчёта.
+	clean := map[string]string{
+		"CDATA": testMarker + "\n<![CDATA[\n" + table + "\n]]>\n\n" + table + "\n",
+		"инструкция обработки": testMarker + "\n<?php\n" + table + "\n?>\n\n" + table + "\n",
+		"объявление":           testMarker + "\n<!DOCTYPE\n" + table + "\n>\n\n" + table + "\n",
+	}
+	for name, report := range clean {
+		t.Run("видимая таблица после "+name, func(t *testing.T) {
+			if got := validateComment(report); len(got) != 0 {
+				t.Fatalf("корректный отчёт отклонён: %q", got)
+			}
+		})
+	}
+}
+
+// TestTableStructureFromRawLine — регрессия: по GFM границы ячеек таблицы
+// определяются раньше встроенной разметки, поэтому HTML-комментарий не может
+// ни скрыть лишнюю черту, ни создать канонический заголовок, ни сделать пустую
+// ячейку непустой.
+func TestTableStructureFromRawLine(t *testing.T) {
+	cases := map[string]struct {
+		report string
+		want   string
+	}{
+		"лишняя черта в комментарии": {
+			report: reportOf("| 1 · `aaaaaaa` | major | `a.go` | ошибка <!-- | --> | confirmed | fix |"),
+			want:   "столбцов вместо 6",
+		},
+		"комментарий создаёт заголовок": {
+			report: testMarker + "\n\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | " +
+				"<!-- x -->Решение | Исправление |\n" + testDelimiter + "\n" + testFinding + "\n",
+			want: "Отсутствует заголовок накопительной таблицы",
+		},
+		"комментарий заполняет пустую ячейку": {
+			report: reportOf("| 1 · `aaaaaaa` | major | `a.go` | <!-- x --> | confirmed | fix |"),
+			want:   "пустую ячейку",
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			problems := validateComment(c.report)
+			if len(problems) == 0 {
+				t.Fatal("структурно некорректная таблица принята")
+			}
+			if !strings.Contains(strings.Join(problems, "\n"), c.want) {
+				t.Fatalf("нет целевой причины отказа %q: %q", c.want, problems)
+			}
+		})
+	}
+	// Экранированная черта в тексте и в строчном коде остаётся частью ячейки.
+	for name, row := range map[string]string{
+		"в тексте":        "| 1 · `aaaaaaa` | minor | `a.go` | разметка a\\|b | confirmed | fix |",
+		"в строчном коде": "| 1 · `aaaaaaa` | minor | `a\\|b.go` | эффект | confirmed | fix |",
+	} {
+		t.Run("экранированная черта "+name, func(t *testing.T) {
+			if got := validateComment(reportOf(row)); len(got) != 0 {
+				t.Fatalf("допустимая строка отклонена: %q", got)
+			}
+		})
 	}
 }
 
@@ -579,6 +754,33 @@ func TestUsageErrors(t *testing.T) {
 		{name: "неизвестный флаг", args: []string{"--bogus", "x"}, wantErr: "Ошибка использования"},
 		{name: "лишний позиционный аргумент", args: []string{"--comment-file", comment, "лишнее"}, wantErr: "лишние позиционные"},
 		{name: "флаг без значения", args: []string{"--comment-file"}, wantErr: "Ошибка использования"},
+		// Режим устанавливается фактом передачи флага: пустой путь не
+		// превращается в выбор другого режима.
+		{
+			name:    "пустой путь при переданном режиме",
+			args:    []string{"--comment-file", ""},
+			wantErr: "пустой --comment-file",
+		},
+		{
+			name:    "пустой путь режима события",
+			args:    []string{"--event-file", ""},
+			wantErr: "пустой --event-file",
+		},
+		{
+			name:    "второй режим с пустым значением",
+			args:    []string{"--comment-file", comment, "--event-file", ""},
+			wantErr: "взаимоисключающие",
+		},
+		{
+			name:    "первый режим с пустым значением",
+			args:    []string{"--comment-file", "", "--event-file", comment},
+			wantErr: "взаимоисключающие",
+		},
+		{
+			name:    "пустой путь через равенство",
+			args:    []string{"--comment-file="},
+			wantErr: "пустой --comment-file",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -781,17 +983,18 @@ const (
 	testSHA      = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	testSHAOther = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	testBaseSHA  = "cccccccccccccccccccccccccccccccccccccccc"
+	// testBaseRepoID — идентификатор репозитория назначения в синтетическом
+	// объекте PR: по нему сверяется каноническая ссылка пагинации.
+	testBaseRepoID = 987654
 )
 
 // trackedBody запоминает факт закрытия тела ответа.
 type trackedBody struct {
 	reader io.Reader
 	closed bool
-	readAt bool
 }
 
 func (b *trackedBody) Read(data []byte) (int, error) {
-	b.readAt = true
 	return b.reader.Read(data)
 }
 
@@ -843,7 +1046,6 @@ func newTransport(t *testing.T, handle func(*http.Request) (*http.Response, erro
 // trackedResponse собирает ответ API с телом и заголовком Link.
 func (s *scriptTransport) trackedResponse(t *testing.T, status int, body, link string) *http.Response {
 	t.Helper()
-	_ = t
 	tracked := &trackedBody{reader: strings.NewReader(body)}
 	s.bodies = append(s.bodies, tracked)
 	header := http.Header{}
@@ -883,8 +1085,11 @@ func pullJSON(t *testing.T, override map[string]any) string {
 		"number": testPRNumber,
 		"user":   map[string]any{"id": 1, "login": "author"},
 		"head":   map[string]any{"sha": testSHA, "ref": "feature/example"},
-		"base":   map[string]any{"sha": testBaseSHA, "ref": "main"},
-		"body":   "Описание PR",
+		"base": map[string]any{
+			"sha": testBaseSHA, "ref": "main",
+			"repo": map[string]any{"id": testBaseRepoID},
+		},
+		"body": "Описание PR",
 	}
 	for key, value := range override {
 		pull[key] = value
@@ -1035,7 +1240,8 @@ func TestAbsentCommentIsSuccess(t *testing.T) {
 	}
 }
 
-// TestPublishedComment проверяет авторство по numeric ID и вывод нарушений.
+// TestPublishedComment проверяет авторство по числовому идентификатору и вывод
+// нарушений.
 func TestPublishedComment(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -1062,7 +1268,7 @@ func TestPublishedComment(t *testing.T) {
 			want:     "не является автором PR",
 		},
 		{
-			name: "тот же логин при другом numeric ID",
+			name: "тот же логин при другом числовом идентификаторе",
 			entries: func(t *testing.T) []map[string]any {
 				return []map[string]any{{"id": 1, "user": map[string]any{"id": 2, "login": "author"}, "body": validReport()}}
 			},
@@ -1202,8 +1408,8 @@ func TestPagination(t *testing.T) {
 				if page != 1 {
 					return ""
 				}
-				return fmt.Sprintf("<https://api.github.com/repositories/123/issues/%d/comments?per_page=100&page=%d>; rel=\"next\"",
-					testPRNumber, page+1)
+				return fmt.Sprintf("<https://api.github.com/repositories/%d/issues/%d/comments?per_page=100&page=%d>; rel=\"next\"",
+					testBaseRepoID, testPRNumber, page+1)
 			},
 			wantCode:  0,
 			wantCalls: 4,
@@ -1243,6 +1449,8 @@ func TestUntrustedLinks(t *testing.T) {
 		"чужой путь":             "<https://api.github.com/wrong?per_page=100&page=2>; rel=\"next\"",
 		"чужой PR":               fmt.Sprintf("<https://api.github.com/repos/%s/issues/8/comments?per_page=100&page=2>; rel=\"next\"", testRepo),
 		"канонический нулевой":   fmt.Sprintf("<https://api.github.com/repositories/0/issues/%d/comments?per_page=100&page=2>; rel=\"next\"", testPRNumber),
+		"чужой идентификатор":    fmt.Sprintf("<https://api.github.com/repositories/%d/issues/%d/comments?per_page=100&page=2>; rel=\"next\"", testBaseRepoID+1, testPRNumber),
+		"идентификатор без цифр": fmt.Sprintf("<https://api.github.com/repositories/x%d/issues/%d/comments?per_page=100&page=2>; rel=\"next\"", testBaseRepoID, testPRNumber),
 		"другая страница":        "<https://api.github.com" + base + "?per_page=100&page=3>; rel=\"next\"",
 		"другой размер страницы": "<https://api.github.com" + base + "?per_page=50&page=2>; rel=\"next\"",
 		"посторонний параметр":   "<https://api.github.com" + base + "?per_page=100&page=2&sort=created>; rel=\"next\"",
@@ -1360,6 +1568,66 @@ func TestPullValidation(t *testing.T) {
 			t.Fatalf("при несогласованном событии сделаны запросы: %q", transport.calls)
 		}
 	})
+}
+
+// TestPaginationNeedsRepositoryIdentity — каноническая ссылка пагинации
+// принимается только при точном совпадении числового идентификатора
+// репозитория назначения. Без достоверного идентификатора полнота чтения не
+// подтверждается: запрос к чужому ресурсу не выполняется.
+func TestPaginationNeedsRepositoryIdentity(t *testing.T) {
+	cases := map[string]struct {
+		override map[string]any
+		link     string
+		wantCode int
+	}{
+		"идентификатор репозитория назначения": {
+			override: nil,
+			link: fmt.Sprintf("<https://api.github.com/repositories/%d/issues/%d/comments?per_page=100&page=2>; rel=\"next\"",
+				testBaseRepoID, testPRNumber),
+			wantCode: 0,
+		},
+		"чужой идентификатор": {
+			override: nil,
+			link: fmt.Sprintf("<https://api.github.com/repositories/%d/issues/%d/comments?per_page=100&page=2>; rel=\"next\"",
+				testBaseRepoID+1, testPRNumber),
+			wantCode: 2,
+		},
+		"нет base.repo": {
+			override: map[string]any{"base": map[string]any{"sha": testBaseSHA, "ref": "main"}},
+			link: fmt.Sprintf("<https://api.github.com/repositories/%d/issues/%d/comments?per_page=100&page=2>; rel=\"next\"",
+				testBaseRepoID, testPRNumber),
+			wantCode: 2,
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			transport, client, _ := newTransport(t, nil)
+			transport.handle = func(request *http.Request) (*http.Response, error) {
+				if isPullRequest(request) {
+					return transport.pull(t, c.override), nil
+				}
+				page := pageNumber(request)
+				entries := []map[string]any{ordinaryComment(2, "первая")}
+				if page > 1 {
+					entries = nil
+				}
+				if page == 1 {
+					return transport.page(t, entries, c.link), nil
+				}
+				return transport.page(t, entries, ""), nil
+			}
+			code, _, stderr := runEvent(t, networkEnv(), client, testEvent(t))
+			if code != c.wantCode {
+				t.Fatalf("код выхода %d, ожидался %d: %q", code, c.wantCode, stderr)
+			}
+			// Запрос строится из доверенного ресурса и не идёт на чужой адрес.
+			for _, address := range transport.calls {
+				if !strings.HasPrefix(address, "https://api.github.com/repos/"+testRepo+"/") {
+					t.Fatalf("запрос ушёл не на исходный ресурс: %q", address)
+				}
+			}
+		})
+	}
 }
 
 // TestPullChangedDuringCheck — изменение PR между чтениями не подтверждает

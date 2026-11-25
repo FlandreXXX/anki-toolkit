@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: read
-  # Только чтение PR и его Conversation: сетевой шаг не пишет в GitHub.
+  # Только чтение PR и его комментариев: сетевой шаг не пишет в GitHub.
   # /pulls/{number} требует pull-requests, /issues/{number}/comments — issues.
   pull-requests: read
   issues: read
@@ -19,7 +19,7 @@ jobs:
     name: Структура PR
     runs-on: ubuntu-latest
     # Пять минут сетевому шагу не хватает при повторах и полной выдаче
-    # комментариев; содержимое PR при этом не интерполируется в shell.
+    # комментариев; содержимое PR при этом не интерполируется в командную оболочку.
     timeout-minutes: 10
     steps:
       - name: Получить код PR
@@ -50,8 +50,9 @@ jobs:
         run: go test .github/scripts/coderabbit-comment-lint/main.go .github/scripts/coderabbit-comment-lint/main_test.go
 
       # Read-only сверка опубликованного состояния: PR, его фактический автор и
-      # полная выдача top-level комментариев Conversation. Токен передаётся
-      # только в окружение этого шага, тело комментариев в shell не попадает.
+      # полная постраничная выдача комментариев верхнего уровня. Токен
+      # передаётся только в окружение этого шага, тело комментариев в командную
+      # оболочку не попадает.
       # Отсутствие отчёта — допустимое состояние: линтер отличает его от ошибки.
       - name: Проверить опубликованный отчёт CodeRabbit
         env:
