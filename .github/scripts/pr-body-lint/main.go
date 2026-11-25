@@ -342,10 +342,11 @@ func trimListItem(text string) string {
 }
 
 // listMarkerLen возвращает длину маркера пункта списка в начале строки:
-// `- `, `* `, `+ `, `1. `, `1) `; ноль — маркера нет.
+// `- `, `* `, `+ `, `1. `, `1) `; ноль — маркера нет. Пробельный символ после
+// маркера не обязателен: пустой пункт (`-`, `1.`) — тоже маркер, а не текст.
 func listMarkerLen(text string) int {
-	if len(text) >= 2 && (text[0] == '-' || text[0] == '*' || text[0] == '+') &&
-		(text[1] == ' ' || text[1] == '\t') {
+	if len(text) >= 1 && (text[0] == '-' || text[0] == '*' || text[0] == '+') &&
+		(len(text) == 1 || text[1] == ' ' || text[1] == '\t') {
 		return 1
 	}
 	digits := 0
@@ -355,7 +356,7 @@ func listMarkerLen(text string) int {
 	if digits == 0 || digits > 9 || digits >= len(text) || (text[digits] != '.' && text[digits] != ')') {
 		return 0
 	}
-	if digits+1 >= len(text) || (text[digits+1] != ' ' && text[digits+1] != '\t') {
+	if digits+1 < len(text) && text[digits+1] != ' ' && text[digits+1] != '\t' {
 		return 0
 	}
 	return digits + 1
@@ -591,21 +592,26 @@ func listItemContent(line string) (int, bool) {
 	return col, true
 }
 
-// openFence распознаёт открывающий маркер ограждённого блока. Блок с отступом
-// не меньшим, чем начало содержимого текущего пункта списка, принадлежит этому
-// пункту: заголовки внутри него не засчитываются, а сам блок завершается при
-// выходе из пункта.
+// openFence распознаёт открывающий маркер ограждённого блока. Допустимый отступ
+// отсчитывается от начала содержимого текущего пункта списка, если блок ему
+// принадлежит: вне списка это до трёх пробелов от начала строки, внутри пункта —
+// до трёх пробелов от listCol. Так же, как closesFence, отступ не может быть
+// абсолютным: при listCol = 4 строка с четырьмя пробелами — законное ограждение.
 func openFence(line string, listCol int) (fence, bool) {
 	pad := leadingSpaces(line)
-	if pad > 3 {
+	base := 0
+	if listCol > 0 && pad >= listCol {
+		base = listCol
+	}
+	if pad-base > 3 {
 		return fence{}, false
 	}
 	ch, length, ok := fenceMarker(line[pad:])
 	if !ok {
 		return fence{}, false
 	}
-	if listCol > 0 && pad >= listCol {
-		return fence{ch: ch, n: length, col: listCol}, true
+	if base > 0 {
+		return fence{ch: ch, n: length, col: base}, true
 	}
 	return fence{ch: ch, n: length}, true
 }

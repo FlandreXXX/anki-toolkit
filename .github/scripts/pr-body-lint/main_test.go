@@ -359,31 +359,64 @@ func TestListFence(t *testing.T) {
 			t.Fatalf("нарушения %q, ожидались %q", got, missingHeaders())
 		}
 	})
-	for _, indent := range []string{"  ", "    ", "\t"} {
-		t.Run("блок открыт на отдельной строке "+indent, func(t *testing.T) {
-			lines := strings.Split(validBody(), "\n")
-			inner := make([]string, len(lines))
-			for i, line := range lines {
-				inner[i] = indent + "  " + line
-			}
-			body := "- ```md\n" + strings.Join(inner, "\n") + "\n" + indent + "  ```\n"
-			if got := validate(body); !slices.Equal(got, missingHeaders()) {
-				t.Fatalf("нарушения %q, ожидались %q", got, missingHeaders())
-			}
-		})
+	// Открывающий маркер — на отдельной строке после пункта списка, с отступом
+	// от начала его содержимого; закрывающий маркер согласован с открывающим.
+	for _, marker := range []string{"- ", "1. "} {
+		for _, indent := range []string{"  ", "   ", "\t"} {
+			t.Run("блок открыт на отдельной строке "+marker+indent, func(t *testing.T) {
+				lines := strings.Split(validBody(), "\n")
+				inner := make([]string, len(lines))
+				for i, line := range lines {
+					inner[i] = indent + line
+				}
+				body := marker + "Пункт списка.\n\n" + indent + "```md\n" +
+					strings.Join(inner, "\n") + "\n" + indent + "```\n"
+				if got := validate(body); !slices.Equal(got, missingHeaders()) {
+					t.Fatalf("нарушения %q, ожидались %q", got, missingHeaders())
+				}
+			})
+		}
 	}
+	// Ограждение с отступом от начала содержимого пункта — тоже блок, а не текст:
+	// содержимое внутри него не засчитывается разделами.
+	t.Run("ограждение нумерованного пункта с отступом четыре", func(t *testing.T) {
+		lines := strings.Split(validBody(), "\n")
+		inner := make([]string, len(lines))
+		for i, line := range lines {
+			inner[i] = "    " + line
+		}
+		body := "10. TODO\n\n    ```text\n" + strings.Join(inner, "\n") + "\n    ```\n"
+		if got := validate(body); !slices.Equal(got, missingHeaders()) {
+			t.Fatalf("нарушения %q, ожидались %q", got, missingHeaders())
+		}
+	})
+	// Блок под пунктом прикрывает единственную заглушку: раздел остаётся заглушкой,
+	// а не становится содержательным из-за текста внутри блока.
+	t.Run("блок не делает заглушку содержанием", func(t *testing.T) {
+		body := bodyWith(map[string]string{
+			"Проверки": "10. TODO\n\n    ```text\n    Пример команды.\n    ```",
+		})
+		want := []string{"Раздел содержит только заглушку: ## Проверки"}
+		if got := validate(body); !slices.Equal(got, want) {
+			t.Fatalf("нарушения %q, ожидались %q", got, want)
+		}
+	})
 }
 
 // TestListIndentedContinuation — регрессия: отступ продолжения пункта списка
 // отсчитывается от начала его содержимого, а не от нуля. Четыре пробела под
 // пунктом списка — продолжение пункта, а не блок кода, поэтому текст остаётся
 // содержанием раздела.
+//
+// Вход намеренно содержит только пустой маркер в первой строке: содержательный
+// текст лежит в продолжении, поэтому при ошибочном отбрасывании продолжения
+// раздел становится заглушкой и тест падает.
 func TestListIndentedContinuation(t *testing.T) {
 	for name, text := range map[string]string{
 		"продолжение под пунктом с отметкой":  "- [x]\n    go test выполнен.",
-		"продолжение под маркером":            "- пункт\n    go test выполнен.",
-		"продолжение под нумерованным":        "1. пункт\n    go test выполнен.",
-		"продолжение под пунктом в 2 колонки": "- пункт списка\n\tgo test выполнен.",
+		"продолжение под пустым маркером":     "- \n    go test выполнен.",
+		"продолжение под нумерованным":        "1. \n    go test выполнен.",
+		"продолжение под пунктом в 2 колонки": "- пункт\n\tgo test выполнен.",
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := validate(bodyWith(map[string]string{"Проверки": text}))
@@ -437,6 +470,11 @@ func TestListPlaceholders(t *testing.T) {
 		"* —":                   "маркированный пункт с тире",
 		"1. TODO\n2. Заполнить": "несколько заглушек подряд",
 		"- [ ]":                 "пустая отметка списка задач",
+		"-":                     "пустой маркированный пункт",
+		"*":                     "пустой маркированный пункт со звёздочкой",
+		"1.":                    "пустой нумерованный пункт",
+		"1)":                    "пустой нумерованный пункт с круглой скобкой",
+		"10.":                   "пустой нумерованный пункт из двух цифр",
 	}
 	for text, name := range placeholders {
 		t.Run(name, func(t *testing.T) {
@@ -451,6 +489,10 @@ func TestListPlaceholders(t *testing.T) {
 		"список с содержательным текстом":    "- валидатор проверяет пять разделов\n- второй пункт списка",
 		"заглушка вместе с реальным текстом": "- TODO\n- проверка выполнена локально",
 		"нумерованный список с текстом":      "1. Проверка выполнена.\n2. Результат записан.",
+		"число с текстом":                    "2024 год, проверка выполнена.",
+		"десятичная дробь":                   "1.5 млн запросов обработано.",
+		"дефис без пробела":                  "-Да, проверено.",
+		"сноска со звёздочкой":               "* сноска с пояснением",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := validate(bodyWith(map[string]string{"Ограничения": text})); len(got) != 0 {
