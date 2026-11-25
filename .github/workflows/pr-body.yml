@@ -1,0 +1,41 @@
+name: Структура описания PR
+
+# Единственный триггер — события PR. Публикация коммита в ветку с открытым PR
+# проверяется через synchronize; вне PR этот рабочий процесс не запускается.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-body:
+    # Стабильное имя проверки: не переименовывать без согласования.
+    name: Структура PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Получить код PR
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Установить Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: '1.27.x'
+          # Go-модуля в репозитории нет, кэшировать нечего.
+          cache: false
+
+      # Проверка кандидатной версии: тесты и валидатор берутся из кода PR.
+      # Это не независимый доверенный барьер — PR, меняющий сам валидатор
+      # или этот рабочий процесс, требует содержательного ревью.
+      - name: Тесты валидатора
+        run: go test .github/scripts/pr-body-lint/main.go .github/scripts/pr-body-lint/main_test.go
+
+      # Вход проверки — снимок события pull_request, а не запрос актуального
+      # удалённого описания. Описание читает сам валидатор из файла события;
+      # подстановка описания в командную оболочку не используется.
+      - name: Проверить описание из снимка события
+        run: go run .github/scripts/pr-body-lint/main.go --event-file "$GITHUB_EVENT_PATH"
