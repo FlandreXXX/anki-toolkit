@@ -477,6 +477,74 @@ func TestEscapedPipe(t *testing.T) {
 	}
 }
 
+// TestHiddenMarkerInCodeInsideList — регрессия: в пункте списка, который сам
+// начинается с блока кода, GFM отводит пункту один пробел после маркера, а не
+// все. Иначе ожидаемый отступ раздувается, и маркер, скрытый в коде пункта,
+// принимается за видимый.
+func TestHiddenMarkerInCodeInsideList(t *testing.T) {
+	// Пункт «-» + пять пробелов: содержимое пункта начинается с колонки 2,
+	// остальное — блок кода, в котором лежит маркер.
+	report := "-     пример\n      " + testMarker + "\n\n" +
+		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	problems := validateComment(report)
+	if len(problems) == 0 {
+		t.Fatal("маркер внутри кода пункта списка принят за видимый")
+	}
+	if !strings.Contains(strings.Join(problems, "\n"), "скрыт") {
+		t.Fatalf("отказ по другой причине: %q", problems)
+	}
+}
+
+// TestRowWithoutPipeEndsTable — регрессия: строка без «|» сразу после строки
+// данных по GFM становится одноклеточной строкой таблицы, а не концом таблицы.
+func TestRowWithoutPipeEndsTable(t *testing.T) {
+	report := testMarker + "\n\n" + testHeader + "\n" + testDelimiter + "\n" + testFinding + "\nПримечание\n"
+	problems := validateComment(report)
+	if len(problems) == 0 {
+		t.Fatal("одноклеточная строка после данных не отклонена")
+	}
+	if !strings.Contains(strings.Join(problems, "\n"), "столбц") {
+		t.Fatalf("отказ по другой причине: %q", problems)
+	}
+	// Пустая строка таблицу по-прежнему завершает, проза после неё —
+	// самостоятельный блок.
+	allowed := testMarker + "\n\n" + testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n\nПримечание\n"
+	if got := validateComment(allowed); len(got) != 0 {
+		t.Fatalf("проза после пустой строки отклонена: %q", got)
+	}
+}
+
+// TestHeaderInsideHTMLBlock — регрессия: строка, начинающаяся с HTML-комментария,
+// по GFM образует HTML-блок целиком, поэтому заголовок таблицы из неё не
+// извлекается.
+func TestHeaderInsideHTMLBlock(t *testing.T) {
+	report := "<!-- пример -->" + testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	report = testMarker + "\n\n" + report
+	problems := validateComment(report)
+	if len(problems) == 0 {
+		t.Fatal("заголовок из строки HTML-блока принят за настоящий")
+	}
+	if !strings.Contains(strings.Join(problems, "\n"), "заголовок") {
+		t.Fatalf("отказ по другой причине: %q", problems)
+	}
+}
+
+// TestClosingRawTagWholeName — регрессия: «</prefix>» не закрывает «<pre>»,
+// иначе скрытый блок заканчивается раньше времени.
+func TestClosingRawTagWholeName(t *testing.T) {
+	report := testMarker + "\n<pre>\nстрока </prefix>\n\n" +
+		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	if got := validateComment(report); len(got) == 0 {
+		t.Fatal("неверный закрывающий тег завершил raw-блок")
+	}
+	// Настоящий закрывающий тег блок действительно закрывает.
+	closed := testMarker + "\n<pre>\nкод\n</pre>\n\n" +
+		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	if got := validateComment(closed); len(got) != 0 {
+		t.Fatalf("настоящий </pre> не закрыл блок: %q", got)
+	}
+}
+
 // writeTemp создаёт файл во временном каталоге теста и возвращает путь.
 func writeTemp(t *testing.T, name string, content []byte) string {
 	t.Helper()

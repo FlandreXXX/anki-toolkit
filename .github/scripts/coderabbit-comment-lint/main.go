@@ -66,6 +66,10 @@ const (
 	// занимает отдельную строку и должен быть виден.
 	commentMarker = "<!-- coderabbit-disposition -->"
 
+	// htmlCommentStart открывает HTML-комментарий; строка, начинающаяся с него,
+	// по GFM является HTML-блоком целиком.
+	htmlCommentStart = "<!--"
+
 	// emptyValue заполняет «Уровень» и «Путь» в clean-строке и допустим только
 	// там.
 	emptyValue      = "—"
@@ -389,6 +393,24 @@ func (v *viewer) line(line string) visibleLine {
 		}
 		return visibleLine{hidden: true}
 	}
+	// Строка, начинающаяся с HTML-комментария, по GFM образует HTML-блок
+	// (тип 2), который заканчивается на строке с «-->». Текст такой строки —
+	// уже не разметка таблицы, поэтому заголовок из неё не извлекается.
+	if strings.HasPrefix(strings.TrimLeft(line, " "), htmlCommentStart) {
+		rest := stripComments(line, &v.comment)
+		switch {
+		case v.comment:
+			// Комментарий не закрылся: скрыт остаток строки и следующие строки.
+			return visibleLine{hidden: true}
+		case strings.TrimSpace(rest) == "":
+			// Комментарий занимает строку целиком: это допустимое место
+			// служебного маркера, но не строка таблицы.
+			return visibleLine{text: ""}
+		default:
+			// После закрытия комментария остаток строки остаётся HTML-текстом.
+			return visibleLine{hidden: true}
+		}
+	}
 	text := stripComments(line, &v.comment)
 	return visibleLine{text: text}
 }
@@ -410,10 +432,27 @@ func htmlBlockStart(line string) (string, bool, bool) {
 	return name, false, true
 }
 
-// closesRawTag сообщает, что в строке есть закрывающий тег raw-блока.
+// closesRawTag сообщает, что в строке есть закрывающий тег raw-блока. Тег
+// сверяется целиком: «</prefix>» не закрывает «<pre>», иначе текст после него
+// ошибочно считался бы видимым.
 func closesRawTag(line, name string) bool {
 	lower := strings.ToLower(line)
-	return strings.Contains(lower, "</"+name)
+	closing := "</" + name
+	for from := 0; ; {
+		index := strings.Index(lower[from:], closing)
+		if index < 0 {
+			return false
+		}
+		end := from + index + len(closing)
+		// Имя тега заканчивается пробелом, «>» или «/»: иначе это другой тег.
+		if end < len(lower) {
+			switch lower[end] {
+			case ' ', '\t', '>', '/', '\r', '\n':
+				return true
+			}
+		}
+		from = end
+	}
 }
 
 // stripComments убирает HTML-комментарии, включая многострочные и незакрытые:
@@ -508,6 +547,11 @@ func leadingSpaces(line string) int {
 
 // listItemContent возвращает столбец начала содержимого пункта списка
 // одноуровневой разметки; второй результат — является ли строка таким пунктом.
+//
+// Если пункт начинается с блока кода с отступом (пять и более пробелов после
+// маркера), GFM отводит пункту ровно один пробел, а остаток считает кодом:
+// иначе ожидаемый отступ раздувается и скрытый в коде текст принимается за
+// видимый.
 func listItemContent(line string) (int, bool) {
 	pad := leadingSpaces(line)
 	if pad > 3 {
@@ -517,11 +561,14 @@ func listItemContent(line string) (int, bool) {
 	if marker == 0 {
 		return 0, false
 	}
-	col := pad + marker
-	for col < len(line) && (line[col] == ' ' || line[col] == '\t') {
-		col++
+	spaces := 0
+	for pad+marker+spaces < len(line) && (line[pad+marker+spaces] == ' ' || line[pad+marker+spaces] == '\t') {
+		spaces++
 	}
-	return col, true
+	if spaces >= 5 {
+		return pad + marker + 1, true
+	}
+	return pad + marker + spaces, true
 }
 
 // listMarkerLen возвращает длину маркера пункта списка в начале текста:
@@ -703,6 +750,40 @@ func sameCells(cells, wanted []string) bool {
 	return true
 }
 
+// startsNewBlock сообщает, что GFM начинает на этой строке другой блок и тем
+// самым завершает таблицу. Проверяются только конструкции, документированные в
+// шапке файла; обычная проза (в том числе с одиночной «|») таблицу не
+// продолжает, а становится её одноклеточной строкой.
+func startsNewBlock(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return true
+	}
+	// Заголовок ATX: «#» … «######» и пробел.
+	run := 0
+	for run < len(trimmed) && trimmed[run] == '#' {
+		run++
+	}
+	if run >= 1 && run <= 6 && run < len(trimmed) && (trimmed[run] == ' ' || trimmed[run] == '\t') {
+		return true
+	}
+	// Блок-цитата, ограждение, пункт списка — отдельные блоки.
+	if quoted(trimmed) {
+		return true
+	}
+	if _, _, ok := fenceMarker(trimmed); ok {
+		return true
+	}
+	if _, ok := listItemContent(trimmed); ok {
+		return true
+	}
+	// Начало raw-HTML-блока или одиночный HTML-тег.
+	if _, _, ok := htmlBlockStart(trimmed); ok {
+		return true
+	}
+	return strings.HasPrefix(trimmed, htmlCommentStart)
+}
+
 // checkTable проверяет состав таблицы: единственный точный заголовок, следующий
 // за ним разделитель из шести ячеек, хотя бы одна строка данных подряд и
 // отсутствие оторванных строк.
@@ -736,6 +817,17 @@ func checkTable(view []visibleLine) []string {
 	end := len(texts)
 	for index := start + 2; index < len(texts); index++ {
 		cells, ok := tableRow(texts[index])
+		if !ok {
+			// Непустая строка без «|» — по GFM это строка таблицы с одной
+			// ячейкой, а не конец таблицы: иначе «Примечание» сразу после строки
+			// данных молча добавлялось бы к отчёту. Таблицу завершает только
+			// пустая строка (скрытые строки тоже пусты) или начало другого
+			// блока.
+			if !blank(texts[index]) && !startsNewBlock(texts[index]) {
+				cells = []string{strings.TrimSpace(texts[index])}
+				ok = true
+			}
+		}
 		if !ok {
 			end = index
 			break

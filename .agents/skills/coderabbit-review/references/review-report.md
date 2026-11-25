@@ -128,5 +128,32 @@ go run .github/scripts/coderabbit-comment-lint/main.go --event-file "$GITHUB_EVE
 полного достоверного чтения; отсутствие отчёта не доказывает, что ревью
 проводилось.
 
+### Локальный запуск сетевой сверки
+
+`GITHUB_EVENT_PATH` существует только на runner'е GitHub Actions. Локальная
+оболочка цикла его не получает, поэтому для локальной сверки файл события
+создаётся из фактического состояния PR, а не выдумывается:
+
+```bash
+gh pr view <number> --json number,headRefOid,headRepositoryOwner,headRepository > /tmp/pr.json
+python3 - /tmp/pr.json <<'PY' > /tmp/event.json
+import json, sys
+pr = json.load(open(sys.argv[1], encoding="utf-8"))
+json.dump({
+    "repository": {"full_name": pr["headRepositoryOwner"]["login"] + "/" + pr["headRepository"]["name"]},
+    "pull_request": {"number": pr["number"], "head": {"sha": pr["headRefOid"]}},
+}, sys.stdout)
+PY
+GITHUB_REPOSITORY=<owner>/<repo> GITHUB_TOKEN=$(gh auth token) \
+  go run .github/scripts/coderabbit-comment-lint/main.go --event-file /tmp/event.json
+```
+
+Минимальный проверяемый снимок события — `repository.full_name`,
+`pull_request.number` и полный `pull_request.head.sha`: линтер сверит их с
+ответом API и откажет, если HEAD PR успел измениться. Токен передаётся только в
+окружение команды; в файл события и в аргументы командной строки он не попадает.
+Неверные `GITHUB_REPOSITORY`, `GITHUB_TOKEN` или несуществующий SHA дают exit `2`
+или отказ сверки, а не ложный успех.
+
 Линтер проверяет форму, историю и авторство; он **не** доказывает, что ревью
 действительно было, что findings приведены полно и что коммиты существуют.
