@@ -433,15 +433,6 @@ func (p *parser) line(line string) {
 // отбрасывает код с отступом, цитаты и горизонтальные линии, иначе засчитывает
 // заголовок раздела или текст текущего раздела.
 func (p *parser) text(line string) {
-	if indentWidth(line) >= 4 {
-		// Блок кода с отступом — литеральный контекст: маркер `<!--` в нём не
-		// открывает комментарий. Внутри уже открытого комментария отступ
-		// семантику его закрытия не меняет.
-		if p.comment {
-			stripComments(line, &p.comment)
-		}
-		return
-	}
 	if blank(line) {
 		// Пустая строка может продолжать пункт списка, поэтому listCol
 		// сохраняется; непустая строка меньшего отступа пункт завершает.
@@ -450,21 +441,35 @@ func (p *parser) text(line string) {
 	if indentWidth(line) < p.listCol {
 		p.listCol = 0
 	}
+	// Блок кода с отступом отсчитывается от начала содержимого текущего пункта
+	// списка: вне списка это четыре пробела, а внутри пункта отступ продолжения
+	// кодом не является. Пока комментарий открыт, отступ на видимость не влияет.
+	if !p.comment && indentWidth(line) >= p.listCol+4 {
+		return
+	}
+	// Ограждение распознаётся по исходной строке, пока комментарий не открыт:
+	// маркер `<!--` в строке информации о блоке не должен открывать комментарий.
+	// Внутри настоящего комментария ограждение — скрытый текст.
+	if !p.comment {
+		if col, ok := listItemContent(line); ok {
+			p.listCol = col
+		}
+		if opening, ok := openFence(line, p.listCol); ok {
+			// Ограждённый блок скрывает остаток текста до своего закрытия.
+			p.fence = &opening
+			return
+		}
+		if opening, ok := openListFence(line); ok {
+			p.fence = &opening
+			return
+		}
+	}
 	line = stripComments(line, &p.comment)
 	if blank(line) {
 		return
 	}
 	if col, ok := listItemContent(line); ok {
 		p.listCol = col
-	}
-	if opening, ok := openFence(line, p.listCol); ok {
-		// Ограждённый блок скрывает остаток текста до своего закрытия.
-		p.fence = &opening
-		return
-	}
-	if opening, ok := openListFence(line); ok {
-		p.fence = &opening
-		return
 	}
 	if quoted(line) || horizontalRule(line) {
 		return
