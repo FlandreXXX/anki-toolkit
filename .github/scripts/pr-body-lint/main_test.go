@@ -6,13 +6,20 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
 
-// sectionText — содержательный текст раздела для синтетических входов.
-var sectionText = map[string]string{
+// contractHeaders — независимый эталон контракта: пять обязательных заголовков
+// в требуемом относительном порядке. Зафиксирован здесь буквально, а не выведен
+// из производственной переменной requiredSections, поэтому изменение состава
+// или порядка в реализации не подменяет тестовый вход молча.
+var contractHeaders = []string{"Цель", "Изменения", "Проверки", "CI", "Ограничения"}
+
+// sectionTexts — содержательный текст раздела для синтетических входов.
+var sectionTexts = map[string]string{
 	"Цель":        "Сделать проверку описания PR предсказуемой.",
 	"Изменения":   "Добавлен валидатор описания и тонкий CI-адаптер.",
 	"Проверки":    "go test и go vet выполнены локально.",
@@ -20,225 +27,455 @@ var sectionText = map[string]string{
 	"Ограничения": "Существенных ограничений нет.",
 }
 
+// bodyFromOrder собирает описание из заголовков в заданном порядке.
+func bodyFromOrder(order []string) string {
+	parts := make([]string, 0, len(order))
+	for _, name := range order {
+		parts = append(parts, "## "+name+"\n"+sectionTexts[name])
+	}
+	return strings.Join(parts, "\n\n") + "\n"
+}
+
+// bodyWith собирает полное описание контракта с заменённым текстом разделов.
 func bodyWith(overrides map[string]string) string {
-	texts := maps.Clone(sectionText)
+	texts := maps.Clone(sectionTexts)
 	maps.Copy(texts, overrides)
-	parts := make([]string, 0, len(requiredSections))
-	for _, name := range requiredSections {
+	parts := make([]string, 0, len(contractHeaders))
+	for _, name := range contractHeaders {
 		parts = append(parts, "## "+name+"\n"+texts[name])
 	}
 	return strings.Join(parts, "\n\n") + "\n"
 }
 
-func validBody() string { return bodyWith(nil) }
+func validBody() string { return bodyFromOrder(contractHeaders) }
+
+// bodyWithout собирает описание без одного обязательного раздела.
+func bodyWithout(name string) string {
+	order := make([]string, 0, len(contractHeaders))
+	for _, header := range contractHeaders {
+		if header != name {
+			order = append(order, header)
+		}
+	}
+	return bodyFromOrder(order)
+}
+
+// missingHeaders — ожидаемая диагностика при полном отсутствии разделов.
+func missingHeaders() []string {
+	problems := make([]string, 0, len(contractHeaders))
+	for _, name := range contractHeaders {
+		problems = append(problems, "Отсутствует обязательный заголовок: ## "+name)
+	}
+	return problems
+}
+
+// TestContractReferenceIsIndependent фиксирует пять обязательных заголовков и их
+// порядок как внешний контракт тестов: изменение производственной переменной не
+// должно проходить незамеченным.
+func TestContractReferenceIsIndependent(t *testing.T) {
+	if !slices.Equal(requiredSections, contractHeaders) {
+		t.Fatalf("контракт разделов изменился: %q, эталон тестов %q", requiredSections, contractHeaders)
+	}
+}
 
 func TestValidate(t *testing.T) {
 	cases := []struct {
-		name       string
-		body       string
-		wantOK     bool
-		wantErrors []string
+		name string
+		body string
+		want []string
 	}{
-		{name: "все разделы с текстом", body: validBody(), wantOK: true},
+		{name: "все разделы с текстом", body: validBody()},
 		{
-			name:   "дополнительный раздел между обязательными",
-			body:   strings.Replace(validBody(), "## Проверки", "## Безопасность\nСекреты не добавлены.\n\n## Проверки", 1),
-			wantOK: true,
+			name: "дополнительный раздел между обязательными",
+			body: strings.Replace(validBody(), "## Проверки",
+				"## Безопасность\nСекреты не добавлены.\n\n## Проверки", 1),
 		},
 		{
-			name:       "отсутствующий раздел",
-			body:       withoutSection("CI"),
-			wantErrors: []string{"Отсутствует обязательный заголовок: ## CI"},
+			name: "отсутствующий раздел",
+			body: bodyWithout("CI"),
+			want: []string{"Отсутствует обязательный заголовок: ## CI"},
 		},
 		{
-			name:       "повторяющийся раздел",
-			body:       validBody() + "\n## Цель\nПовторный раздел.\n",
-			wantErrors: []string{"Заголовок повторяется: ## Цель"},
-		},
-		{name: "переставленные разделы", body: swappedBody(), wantErrors: []string{"порядок"}},
-		{
-			name:       "раздел только в комментарии",
-			body:       "<!--\n" + validBody() + "\n-->\n",
-			wantErrors: []string{"Отсутствует обязательный заголовок: ## Цель"},
+			name: "повторяющийся раздел",
+			body: validBody() + "\n## Цель\nПовторный раздел.\n",
+			want: []string{"Заголовок повторяется: ## Цель"},
 		},
 		{
-			name:       "незакрытый комментарий скрывает остаток",
-			body:       "## Цель\nИнформация.\n<!--\n## Изменения\nИнформация.\n## Проверки\nИнформация.\n",
-			wantErrors: []string{"## Изменения"},
+			name: "перестановка первых двух разделов",
+			body: bodyFromOrder([]string{"Изменения", "Цель", "Проверки", "CI", "Ограничения"}),
+			want: []string{"Нарушен порядок разделов: ## Изменения расположен раньше, чем ## Цель"},
 		},
 		{
-			name:       "заголовки в fenced-блоке",
-			body:       "```md\n" + validBody() + "```\n",
-			wantErrors: []string{"## Цель"},
+			name: "перестановка средних разделов",
+			body: bodyFromOrder([]string{"Цель", "Изменения", "CI", "Проверки", "Ограничения"}),
+			want: []string{"Нарушен порядок разделов: ## CI расположен раньше, чем ## Проверки"},
 		},
 		{
-			name:       "тильда-ограждение",
-			body:       "~~~md\n" + validBody() + "~~~\n",
-			wantErrors: []string{"## Цель"},
+			name: "перестановка последних разделов",
+			body: bodyFromOrder([]string{"Цель", "Изменения", "Проверки", "Ограничения", "CI"}),
+			want: []string{"Нарушен порядок разделов: ## Ограничения расположен раньше, чем ## CI"},
 		},
 		{
-			name:       "info string внутри блока не закрывает его",
-			body:       "```text\n```md\n" + validBody() + "```\n",
-			wantErrors: []string{"## Цель"},
+			name: "раздел только в комментарии",
+			body: "<!--\n" + validBody() + "\n-->\n",
+			want: missingHeaders(),
 		},
 		{
-			name:       "более длинный маркер не закрывается коротким",
-			body:       "````md\n```\n" + validBody() + "````\n",
-			wantErrors: []string{"## Цель"},
+			name: "незакрытый комментарий скрывает остаток",
+			body: "## Цель\nИнформация.\n<!--\n## Изменения\nИнформация.\n## Проверки\nИнформация.\n",
+			want: []string{
+				"Отсутствует обязательный заголовок: ## Изменения",
+				"Отсутствует обязательный заголовок: ## Проверки",
+				"Отсутствует обязательный заголовок: ## CI",
+				"Отсутствует обязательный заголовок: ## Ограничения",
+			},
 		},
 		{
-			name:       "разные маркеры не закрывают друг друга",
-			body:       "~~~md\n" + validBody() + "```\n",
-			wantErrors: []string{"## Цель"},
+			name: "заголовки в ограждённом блоке",
+			body: "```md\n" + validBody() + "```\n",
+			want: missingHeaders(),
 		},
 		{
-			name:       "незакрытый fenced-блок скрывает остаток",
-			body:       "```md\n" + validBody(),
-			wantErrors: []string{"## Цель"},
+			name: "тильда-ограждение",
+			body: "~~~md\n" + validBody() + "~~~\n",
+			want: missingHeaders(),
 		},
 		{
-			name:       "заголовок в блок-цитате",
-			body:       "> ## Цель\n> Информация.\n" + strings.Replace(validBody(), "## Цель\n", "", 1),
-			wantErrors: []string{"## Цель"},
+			name: "строка информации о блоке не закрывает его",
+			body: "```text\n```md\n" + validBody() + "```\n",
+			want: missingHeaders(),
 		},
 		{
-			name:       "заголовок с отступом кода",
-			body:       "    ## Цель\n    Информация.\n" + strings.Replace(validBody(), "## Цель\n", "", 1),
-			wantErrors: []string{"## Цель"},
+			name: "более длинный маркер не закрывается коротким",
+			body: "````md\n```\n" + validBody() + "````\n",
+			want: missingHeaders(),
 		},
 		{
-			name:       "заголовок с отступом табуляции",
-			body:       "\t## Цель\n\tИнформация.\n" + strings.Replace(validBody(), "## Цель\n", "", 1),
-			wantErrors: []string{"## Цель"},
+			name: "разные маркеры не закрывают друг друга",
+			body: "~~~md\n" + validBody() + "```\n",
+			want: missingHeaders(),
 		},
 		{
-			name:   "корректные закрывающие решётки не входят в имя",
-			body:   strings.Replace(bodyWith(nil), "## Цель", "## Цель ###", 1),
-			wantOK: true,
+			name: "незакрытый блок верхнего уровня скрывает остаток",
+			body: "```md\n" + validBody(),
+			want: missingHeaders(),
 		},
 		{
-			name:   "заголовки первого и третьего уровня не считаются разделами",
-			body:   "# Цель\nИнформация.\n\n### Изменения\nИнформация.\n\n" + validBody(),
-			wantOK: true,
+			name: "заголовок в блок-цитате",
+			body: "> ## Цель\n> Информация.\n" + bodyWithout("Цель"),
+			want: []string{"Отсутствует обязательный заголовок: ## Цель"},
 		},
 		{
-			name:       "пустой раздел",
-			body:       strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "   ", 1),
-			wantErrors: []string{"Пустой обязательный раздел: ## CI"},
+			name: "заголовок с отступом кода",
+			body: "    ## Цель\n    Информация.\n" + bodyWithout("Цель"),
+			want: []string{"Отсутствует обязательный заголовок: ## Цель"},
 		},
 		{
-			name:       "раздел только из горизонтальной линии",
-			body:       strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "---", 1),
-			wantErrors: []string{"Пустой обязательный раздел: ## CI"},
+			name: "заголовок с отступом табуляции",
+			body: "\t## Цель\n\tИнформация.\n" + bodyWithout("Цель"),
+			want: []string{"Отсутствует обязательный заголовок: ## Цель"},
 		},
 		{
-			name:       "раздел только из код-блока",
-			body:       strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "```\nэто пример\n```", 1),
-			wantErrors: []string{"Пустой обязательный раздел: ## CI"},
+			name: "корректные закрывающие решётки не входят в имя",
+			body: strings.Replace(validBody(), "## Цель", "## Цель ###", 1),
 		},
 		{
-			name:       "заглушка TODO",
-			body:       strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "TODO", 1),
-			wantErrors: []string{"заглушку: ## CI"},
+			name: "заголовки первого и третьего уровня не считаются разделами",
+			body: "# Цель\nИнформация.\n\n### Изменения\nИнформация.\n\n" + validBody(),
 		},
 		{
-			name:       "заглушка с многоточием",
-			body:       strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "…", 1),
-			wantErrors: []string{"заглушку: ## CI"},
+			name: "пустой раздел",
+			body: strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "   ", 1),
+			want: []string{"Пустой обязательный раздел: ## CI"},
 		},
 		{
-			name:       "заглушка из шаблонной подсказки",
-			body:       strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "<статус CI>", 1),
-			wantErrors: []string{"заглушку: ## CI"},
+			name: "раздел только из горизонтальной линии",
+			body: strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "---", 1),
+			want: []string{"Пустой обязательный раздел: ## CI"},
 		},
 		{
-			name:       "несколько заглушек вместо текста",
-			body:       strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "TODO\nTBD\n—", 1),
-			wantErrors: []string{"заглушку: ## CI"},
+			name: "раздел только из блока кода",
+			body: strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "```\nэто пример\n```", 1),
+			want: []string{"Пустой обязательный раздел: ## CI"},
 		},
 		{
-			name:   "содержательная фраза об отсутствии ограничений принимается",
-			body:   bodyWith(map[string]string{"Ограничения": "Существенных ограничений нет."}),
-			wantOK: true,
+			name: "заглушка TODO",
+			body: strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "TODO", 1),
+			want: []string{"Раздел содержит только заглушку: ## CI"},
 		},
 		{
-			name:   "честный статус невыполненной проверки принимается",
-			body:   bodyWith(map[string]string{"CI": "not run: workflow ещё не добавлен в base."}),
-			wantOK: true,
+			name: "заглушка с многоточием",
+			body: strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "…", 1),
+			want: []string{"Раздел содержит только заглушку: ## CI"},
 		},
 		{
-			name:   "комментарий рядом с текстом не скрывает текст",
-			body:   strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "<!-- пояснение -->\nФакт CI.", 1),
-			wantOK: true,
+			name: "заглушка из шаблонной подсказки",
+			body: strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "<статус CI>", 1),
+			want: []string{"Раздел содержит только заглушку: ## CI"},
 		},
 		{
-			name:   "маркер комментария внутри fenced-блока литерален",
-			body:   validBody() + "\n```md\n<!-- скрытый пример -->\n```\n",
-			wantOK: true,
+			name: "несколько заглушек вместо текста",
+			body: strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "TODO\nTBD\n—", 1),
+			want: []string{"Раздел содержит только заглушку: ## CI"},
 		},
 		{
-			name:       "пустое описание",
-			body:       "\n \n",
-			wantErrors: []string{"пустое"},
+			name: "содержательная фраза об отсутствии ограничений принимается",
+			body: bodyWith(map[string]string{"Ограничения": "Существенных ограничений нет."}),
 		},
 		{
-			name:       "null-строка не является содержанием",
-			body:       "null\n",
-			wantErrors: []string{"Отсутствует обязательный заголовок: ## Цель"},
+			name: "честный статус невыполненной проверки принимается",
+			body: bodyWith(map[string]string{"CI": "not run: workflow ещё не добавлен в base."}),
+		},
+		{
+			name: "комментарий рядом с текстом не скрывает текст",
+			body: bodyWith(map[string]string{"CI": "<!-- пояснение -->\nФакт CI."}),
+		},
+		{
+			name: "маркер комментария внутри ограждённого блока литерален",
+			body: validBody() + "\n```md\n<!-- скрытый пример -->\n```\n",
+		},
+		{
+			name: "пустое описание",
+			body: "\n \n",
+			want: []string{
+				"Описание PR пустое: нужны обязательные разделы " +
+					"## Цель, ## Изменения, ## Проверки, ## CI, ## Ограничения",
+			},
+		},
+		{
+			name: "строка null не является содержанием",
+			body: "null\n",
+			want: missingHeaders(),
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := validate(c.body)
-			if c.wantOK {
-				if len(got) != 0 {
-					t.Fatalf("ожидался успех, получены ошибки: %v", got)
-				}
-				return
-			}
-			if len(got) == 0 {
-				t.Fatalf("ожидалась ошибка, нарушений не найдено")
-			}
-			for _, want := range c.wantErrors {
-				found := false
-				for _, problem := range got {
-					if strings.Contains(problem, want) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("в диагностике нет %q: %v", want, got)
-				}
+			if !slices.Equal(got, c.want) {
+				t.Fatalf("нарушения %q, ожидались %q", got, c.want)
 			}
 		})
 	}
 }
 
-// swappedBody меняет местами разделы «Цель» и «Изменения».
-func swappedBody() string {
-	swapped := strings.Replace(validBody(), "## Цель", "## ВРЕМЕННО", 1)
-	swapped = strings.Replace(swapped, "## Изменения", "## Цель", 1)
-	return strings.Replace(swapped, "## ВРЕМЕННО", "## Изменения", 1)
-}
-
-// withoutSection убирает обязательный раздел вместе с его текстом.
-func withoutSection(name string) string {
-	return strings.Replace(validBody(), "## "+name+"\n"+sectionText[name], "", 1)
-}
-
-func TestValidateReorder(t *testing.T) {
-	got := validate(swappedBody())
-	if len(got) == 0 {
-		t.Fatal("ожидалась ошибка порядка разделов")
+// TestInlineCodeCommentMarkerIsLiteral — регрессия: литеральный маркер `<!--`
+// в строчном коде не открывает HTML-комментарий и не скрывает следующие
+// заголовки. Воспроизводится на полном описании с единственным отклонением.
+func TestInlineCodeCommentMarkerIsLiteral(t *testing.T) {
+	body := bodyWith(map[string]string{
+		"Изменения": "Добавить обработку маркера `<!--` в Markdown и проверить его.",
+	})
+	if got := validate(body); len(got) != 0 {
+		t.Fatalf("маркер в строчном коде скрыл описание: %q", got)
 	}
-	if !strings.Contains(strings.Join(got, "\n"), "порядок") {
-		t.Fatalf("диагностика не сообщает о порядке: %v", got)
+	// Двойные обратные кавычки — тоже строчный код.
+	body = bodyWith(map[string]string{
+		"Изменения": "Пример ``<!--`` внутри строчного кода описания.",
+	})
+	if got := validate(body); len(got) != 0 {
+		t.Fatalf("маркер в строчном коде из двух кавычек скрыл описание: %q", got)
+	}
+	// Настоящий комментарий рядом со строчным кодом по-прежнему скрывает текст.
+	body = bodyWith(map[string]string{
+		"CI": "Код `<!--` виден.\n<!-- скрытый фрагмент -->",
+	})
+	if got := validate(body); len(got) != 0 {
+		t.Fatalf("комментарий рядом со строчным кодом отклонён: %q", got)
+	}
+	// Незакрытый настоящий комментарий по-прежнему скрывает всё до конца,
+	// но видимый текст самого раздела сохраняется.
+	body = bodyWith(map[string]string{
+		"CI": "Код `<!--` виден.\n<!-- незакрытый комментарий",
+	})
+	want := []string{"Отсутствует обязательный заголовок: ## Ограничения"}
+	if got := validate(body); !slices.Equal(got, want) {
+		t.Fatalf("нарушения %q, ожидались %q", got, want)
+	}
+}
+
+// TestIndentedCodeCommentMarkerIsLiteral — регрессия: маркер `<!--` в настоящем
+// блоке кода с отступом не изменяет состояние комментария.
+func TestIndentedCodeCommentMarkerIsLiteral(t *testing.T) {
+	body := bodyWith(map[string]string{
+		"Изменения": "Пример разметки:\n\n    <!-- литеральный маркер в коде\n\nПосле примера обычный текст.",
+	})
+	if got := validate(body); len(got) != 0 {
+		t.Fatalf("маркер в блоке кода с отступом скрыл описание: %q", got)
+	}
+	// Незакрытый настоящий комментарий с отступом внутри по-прежнему закрывается
+	// собственным маркером и не ломает семантику комментария.
+	body = bodyWith(map[string]string{
+		"CI": "Факт CI.\n<!--\n    текст внутри комментария\n-->\nВторой факт CI.",
+	})
+	if got := validate(body); len(got) != 0 {
+		t.Fatalf("блок кода внутри комментария отклонён: %q", got)
+	}
+}
+
+// TestListFence — ограждённый блок внутри одноуровневого пункта списка в обеих
+// формах открытия: в строке пункта и на последующей строке с отступом.
+func TestListFence(t *testing.T) {
+	t.Run("заголовки внутри блока пункта не засчитываются", func(t *testing.T) {
+		body := bodyWith(map[string]string{
+			"Цель": "- Пример разметки.\n\n  ```text\n  ## Изменения\n  ## Проверки\n  ```",
+		})
+		if got := validate(body); len(got) != 0 {
+			t.Fatalf("заголовки внутри блока пункта засчитаны или блок сломал разбор: %q", got)
+		}
+	})
+	t.Run("заголовок после выхода из пункта распознаётся", func(t *testing.T) {
+		body := bodyWith(map[string]string{
+			"Цель": "- Пояснение к примеру.\n\n  ```text\n  Пример кода без закрывающего маркера.",
+		})
+		if got := validate(body); len(got) != 0 {
+			t.Fatalf("незакрытый блок пункта скрыл последующие разделы: %q", got)
+		}
+	})
+	t.Run("следующий пункт списка остаётся списком", func(t *testing.T) {
+		body := bodyWith(map[string]string{
+			"Изменения": "- первый пункт\n- второй пункт\n\n  ```text\n  пример\n  ```\n\n- третий пункт",
+		})
+		if got := validate(body); len(got) != 0 {
+			t.Fatalf("список после блока отклонён: %q", got)
+		}
+	})
+	t.Run("блок верхнего уровня с отступом остаётся блоком", func(t *testing.T) {
+		// Отступ меньше начала содержимого пункта: это блок верхнего уровня.
+		body := bodyWith(map[string]string{
+			"Изменения": "Текст пункта.\n\n- пункт списка\n\n ```text\n ## Изменения\n ```\n\nПродолжение.",
+		})
+		if got := validate(body); len(got) != 0 {
+			t.Fatalf("блок верхнего уровня сломал разбор: %q", got)
+		}
+	})
+	t.Run("блок открыт в строке пункта", func(t *testing.T) {
+		lines := strings.Split(validBody(), "\n")
+		inner := make([]string, len(lines))
+		for i, line := range lines {
+			inner[i] = "  " + line
+		}
+		body := "- ```markdown\n" + strings.Join(inner, "\n") + "\n  ```\n"
+		if got := validate(body); !slices.Equal(got, missingHeaders()) {
+			t.Fatalf("нарушения %q, ожидались %q", got, missingHeaders())
+		}
+	})
+	for _, indent := range []string{"  ", "    ", "\t"} {
+		t.Run("блок открыт на отдельной строке "+indent, func(t *testing.T) {
+			lines := strings.Split(validBody(), "\n")
+			inner := make([]string, len(lines))
+			for i, line := range lines {
+				inner[i] = indent + "  " + line
+			}
+			body := "- ```md\n" + strings.Join(inner, "\n") + "\n" + indent + "  ```\n"
+			if got := validate(body); !slices.Equal(got, missingHeaders()) {
+				t.Fatalf("нарушения %q, ожидались %q", got, missingHeaders())
+			}
+		})
+	}
+}
+
+// TestListPlaceholders — маркеры маркированного, нумерованного списка и списка
+// задач не являются содержанием: раздел из одних заглушек отклоняется, список с
+// реальным текстом принимается.
+func TestListPlaceholders(t *testing.T) {
+	placeholders := map[string]string{
+		"- TODO":                "маркированный пункт",
+		"1. Заполнить":          "нумерованный пункт",
+		"2) Уточнить":           "нумерованный пункт с круглой скобкой",
+		"- [ ] Уточнить":        "пункт списка задач без отметки",
+		"- [x] TBD":             "пункт списка задач с отметкой",
+		"* —":                   "маркированный пункт с тире",
+		"1. TODO\n2. Заполнить": "несколько заглушек подряд",
+		"- [ ]":                 "пустая отметка списка задач",
+	}
+	for text, name := range placeholders {
+		t.Run(name, func(t *testing.T) {
+			got := validate(bodyWith(map[string]string{"Ограничения": text}))
+			want := []string{"Раздел содержит только заглушку: ## Ограничения"}
+			if !slices.Equal(got, want) {
+				t.Fatalf("нарушения %q, ожидались %q", got, want)
+			}
+		})
+	}
+	for name, text := range map[string]string{
+		"список с содержательным текстом":    "- валидатор проверяет пять разделов\n- второй пункт списка",
+		"заглушка вместе с реальным текстом": "- TODO\n- проверка выполнена локально",
+		"нумерованный список с текстом":      "1. Проверка выполнена.\n2. Результат записан.",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := validate(bodyWith(map[string]string{"Ограничения": text})); len(got) != 0 {
+				t.Fatalf("содержательный список отклонён: %q", got)
+			}
+		})
+	}
+}
+
+func TestCodePointLimit(t *testing.T) {
+	base := validBody()
+	if count := utf8.RuneCountInString(base); count >= maxBodyPoints {
+		t.Fatalf("базовое описание уже длиннее лимита: %d", count)
+	}
+	exact := base + strings.Repeat("😀", maxBodyPoints-utf8.RuneCountInString(base))
+	if got := validate(exact); len(got) != 0 {
+		t.Fatalf("ровно %d кодовых точек отклонены: %q", maxBodyPoints, got)
+	}
+	if got := validate(exact + "😀"); len(got) == 0 {
+		t.Fatalf("превышение лимита на одну кодовую точку принято")
+	} else if !strings.Contains(strings.Join(got, "\n"), "10001") {
+		t.Fatalf("диагностика лимита без фактического числа: %q", got)
+	}
+	// Кириллица: байты превышают лимит, кодовые точки — нет.
+	cyrillic := base + strings.Repeat("я", maxBodyPoints-utf8.RuneCountInString(base))
+	if len(cyrillic) <= maxBodyPoints {
+		t.Fatalf("ожидался вход длиннее лимита в байтах: %d", len(cyrillic))
+	}
+	if got := validate(cyrillic); len(got) != 0 {
+		t.Fatalf("кириллица у границы отклонена: %q", got)
+	}
+}
+
+func TestLineEndingsNormalized(t *testing.T) {
+	base := validBody()
+	for name, body := range map[string]string{
+		"crlf": strings.ReplaceAll(base, "\n", "\r\n"),
+		"cr":   strings.ReplaceAll(base, "\n", "\r"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := validate(body); len(got) != 0 {
+				t.Fatalf("окончания строк не нормализованы: %q", got)
+			}
+		})
+	}
+	// CRLF не должен съедать одну кодовую точку из лимита.
+	exact := base + strings.Repeat("😀", maxBodyPoints-utf8.RuneCountInString(base))
+	crlf := strings.ReplaceAll(exact, "\n", "\r\n")
+	if got := validate(crlf); len(got) != 0 {
+		t.Fatalf("CRLF сдвинул границу лимита: %q", got)
+	}
+	if got := validate(crlf + "😀"); len(got) == 0 {
+		t.Fatalf("граница после нормализации CRLF не проверяется")
+	}
+}
+
+func TestShellMetacharactersAreData(t *testing.T) {
+	text := "Оболочка не вызывается: | $(id) `whoami` ; rm -rf / не выполняются."
+	body := bodyWith(map[string]string{
+		"Проверки": text + "\n\n```sh\n<!-- не комментарий, а литерал -->\n$ echo $(id)\n```",
+	})
+	if got := validate(body); len(got) != 0 {
+		t.Fatalf("разметка в тексте обработана как код: %q", got)
+	}
+	// Полное недоверенное описание не попадает в вывод.
+	problems := validate(strings.Replace(body, "## Цель", "## Цель $(id) |", 1))
+	for _, problem := range problems {
+		if strings.Contains(problem, "$(id)") || strings.Contains(problem, "whoami") {
+			t.Fatalf("диагностика воспроизводит описание: %q", problem)
+		}
 	}
 }
 
 // TestValidatePlaceholderRejected доказывает, что чистая функция отклоняет
-// заглушку и пустой раздел, а не только CLI.
+// заглушку в обязательном разделе с указанием именно этого раздела.
 func TestValidatePlaceholderRejected(t *testing.T) {
 	for name, text := range map[string]string{
 		"todo":      "TODO",
@@ -253,103 +490,13 @@ func TestValidatePlaceholderRejected(t *testing.T) {
 		"вопрос":    "?",
 	} {
 		t.Run(name, func(t *testing.T) {
-			body := bodyWith(map[string]string{"Ограничения": text})
-			if got := validate(body); len(got) == 0 {
-				t.Fatalf("заглушка %q принята", text)
+			got := validate(bodyWith(map[string]string{"Ограничения": text}))
+			want := []string{"Раздел содержит только заглушку: ## Ограничения"}
+			if !slices.Equal(got, want) {
+				t.Fatalf("нарушения %q, ожидались %q", got, want)
 			}
 		})
 	}
-}
-
-func TestCodePointLimit(t *testing.T) {
-	base := validBody()
-	if count := utf8.RuneCountInString(base); count >= maxBodyPoints {
-		t.Fatalf("базовый body уже длиннее лимита: %d", count)
-	}
-	exact := base + strings.Repeat("😀", maxBodyPoints-utf8.RuneCountInString(base))
-	if got := validate(exact); len(got) != 0 {
-		t.Fatalf("ровно %d code points отклонены: %v", maxBodyPoints, got)
-	}
-	if got := validate(exact + "😀"); len(got) == 0 {
-		t.Fatalf("превышение лимита на один code point принято")
-	} else if !strings.Contains(strings.Join(got, "\n"), "10001") {
-		t.Fatalf("диагностика лимита без фактического числа: %v", got)
-	}
-	// Кириллица: байты превышают лимит, code points — нет.
-	cyrillic := base + strings.Repeat("я", maxBodyPoints-utf8.RuneCountInString(base))
-	if len(cyrillic) <= maxBodyPoints {
-		t.Fatalf("ожидался вход длиннее лимита в байтах: %d", len(cyrillic))
-	}
-	if got := validate(cyrillic); len(got) != 0 {
-		t.Fatalf("кириллица у границы отклонена: %v", got)
-	}
-}
-
-func TestLineEndingsNormalized(t *testing.T) {
-	base := validBody()
-	for name, body := range map[string]string{
-		"crlf": strings.ReplaceAll(base, "\n", "\r\n"),
-		"cr":   strings.ReplaceAll(base, "\n", "\r"),
-	} {
-		t.Run(name, func(t *testing.T) {
-			if got := validate(body); len(got) != 0 {
-				t.Fatalf("окончания строк не нормализованы: %v", got)
-			}
-		})
-	}
-	// CRLF не должен съедать один code point из лимита.
-	base = validBody()
-	exact := base + strings.Repeat("😀", maxBodyPoints-utf8.RuneCountInString(base))
-	crlf := strings.ReplaceAll(exact, "\n", "\r\n")
-	if got := validate(crlf); len(got) != 0 {
-		t.Fatalf("CRLF сдвинул границу лимита: %v", got)
-	}
-	if got := validate(crlf + "😀"); len(got) == 0 {
-		t.Fatalf("граница после нормализации CRLF не проверяется")
-	}
-}
-
-func TestShellMetacharactersAreData(t *testing.T) {
-	text := "Оболочка не вызывается: | $(id) `whoami` ; rm -rf / не выполняются."
-	body := bodyWith(map[string]string{"Проверки": text + "\n\n```sh\n<!-- не комментарий, а литерал -->\n$ echo $(id)\n```"})
-	if got := validate(body); len(got) != 0 {
-		t.Fatalf("разметка в тексте обработана как код: %v", got)
-	}
-	// Полный недоверенный body не попадает в вывод.
-	problems := validate(strings.Replace(body, "## Цель", "## Цель $(id) |", 1))
-	for _, problem := range problems {
-		if strings.Contains(problem, "$(id)") || strings.Contains(problem, "whoami") {
-			t.Fatalf("диагностика воспроизводит body: %v", problem)
-		}
-	}
-}
-
-func TestNestedListFence(t *testing.T) {
-	nested := "- ```markdown\n" + strings.Join(prefixLines(strings.Split(validBody(), "\n"), "  "), "\n") + "\n  ```\n"
-	if got := validate(nested); len(got) == 0 {
-		t.Fatal("пример внутри пункта списка засчитан как разделы body")
-	}
-	for _, indent := range []string{"  ", "    ", "\t"} {
-		t.Run("indent="+indent, func(t *testing.T) {
-			fenced := "- ```md\n" + strings.Join(prefixLines(strings.Split(validBody(), "\n"), indent+"  "), "\n") + "\n" + indent + "  ```\n"
-			if got := validate(fenced); len(got) == 0 {
-				t.Fatal("вложенный fenced-блок засчитан как разделы body")
-			}
-		})
-	}
-	// Содержательный текст пункта списка остаётся содержанием раздела.
-	body := bodyWith(map[string]string{"Изменения": "- валидатор проверяет пять разделов\n- второй пункт списка"})
-	if got := validate(body); len(got) != 0 {
-		t.Fatalf("обычный список отклонён: %v", got)
-	}
-}
-
-func prefixLines(lines []string, prefix string) []string {
-	result := make([]string, len(lines))
-	for i, line := range lines {
-		result[i] = prefix + line
-	}
-	return result
 }
 
 // writeTemp создаёт файл во временном каталоге теста и возвращает путь.
@@ -405,15 +552,15 @@ func TestInputErrors(t *testing.T) {
 		args    []string
 		wantErr string
 	}{
-		{name: "отсутствующий body-файл", args: []string{"--body-file", missing}, wantErr: "Ошибка входа"},
-		{name: "нечитаемый event-файл", args: []string{"--event-file", missing}, wantErr: "Ошибка входа"},
-		{name: "некорректный UTF-8 в body", args: []string{"--body-file", writeTemp(t, "bad.md", []byte{0xff, 0xfe, 0x20})}, wantErr: "UTF-8"},
+		{name: "отсутствующий файл описания", args: []string{"--body-file", missing}, wantErr: "Ошибка входа"},
+		{name: "нечитаемый файл события", args: []string{"--event-file", missing}, wantErr: "Ошибка входа"},
+		{name: "некорректный UTF-8 в описании", args: []string{"--body-file", writeTemp(t, "bad.md", []byte{0xff, 0xfe, 0x20})}, wantErr: "UTF-8"},
 		{name: "некорректный UTF-8 в событии", args: []string{"--event-file", writeTemp(t, "bad.json", []byte{0xff, 0x00})}, wantErr: "UTF-8"},
 		{name: "некорректный JSON", args: []string{"--event-file", writeTemp(t, "broken.json", []byte(`{"pull_request":`))}, wantErr: "JSON"},
 		{name: "нет объекта pull_request", args: []string{"--event-file", writeTemp(t, "no-pr.json", []byte(`{"action":"edited"}`))}, wantErr: "pull_request"},
 		{name: "pull_request null", args: []string{"--event-file", writeTemp(t, "null-pr.json", []byte(`{"pull_request":null}`))}, wantErr: "pull_request"},
 		{name: "pull_request не объект", args: []string{"--event-file", writeTemp(t, "array-pr.json", []byte(`{"pull_request":[]}`))}, wantErr: "не является объектом"},
-		{name: "body не строка", args: []string{"--event-file", writeTemp(t, "num-body.json", []byte(`{"pull_request":{"body":42}}`))}, wantErr: "строкой"},
+		{name: "описание не строка", args: []string{"--event-file", writeTemp(t, "num-body.json", []byte(`{"pull_request":{"body":42}}`))}, wantErr: "строкой"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -430,10 +577,10 @@ func TestInputErrors(t *testing.T) {
 
 func TestManualEmptyBodyIsViolation(t *testing.T) {
 	for name, payload := range map[string]string{
-		"null":     `{"pull_request":{"body":null,"user":{"login":"someone","type":"User"},"head":{"ref":"feat/x"}}}`,
-		"пустой":   `{"pull_request":{"body":"","user":{"login":"someone","type":"User"},"head":{"ref":"feat/x"}}}`,
-		"пробелы":  `{"pull_request":{"body":"  \n\t\n","user":{"login":"someone","type":"User"},"head":{"ref":"feat/x"}}}`,
-		"нет поля": `{"pull_request":{"user":{"login":"someone","type":"User"},"head":{"ref":"feat/x"}}}`,
+		"null":          `{"pull_request":{"body":null,"user":{"login":"someone","type":"User"},"head":{"ref":"feat/x"}}}`,
+		"пустая строка": `{"pull_request":{"body":"","user":{"login":"someone","type":"User"},"head":{"ref":"feat/x"}}}`,
+		"пробелы":       `{"pull_request":{"body":"  \n\t\n","user":{"login":"someone","type":"User"},"head":{"ref":"feat/x"}}}`,
+		"нет поля":      `{"pull_request":{"user":{"login":"someone","type":"User"},"head":{"ref":"feat/x"}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := writeTemp(t, "event.json", []byte(payload))
@@ -441,8 +588,8 @@ func TestManualEmptyBodyIsViolation(t *testing.T) {
 			if code != 1 {
 				t.Fatalf("код выхода %d, ожидался 1", code)
 			}
-			if stderr == "" {
-				t.Fatal("нарушение контракта без диагностики")
+			if !strings.Contains(stderr, "Описание PR пустое") {
+				t.Fatalf("нет диагностики пустого описания: %q", stderr)
 			}
 			if stdout != "" {
 				t.Fatalf("неожиданный вывод в stdout: %q", stdout)
@@ -451,21 +598,12 @@ func TestManualEmptyBodyIsViolation(t *testing.T) {
 	}
 }
 
-// eventJSON собирает синтетический снимок события pull_request.
-func eventJSON(t *testing.T, body, login, accountType, branch string) string {
+// eventJSON собирает синтетический снимок события pull_request из готового
+// объекта PR; sender всегда бот, поэтому проверяется защита от подмены.
+func eventJSON(t *testing.T, pr map[string]any) string {
 	t.Helper()
-	pr := map[string]any{
-		"body":  body,
-		"title": "renovate[bot] renovate/update",
-		"user":  map[string]any{"login": login, "type": accountType},
-		"head":  map[string]any{"ref": branch},
-		"labels": []map[string]any{
-			{"name": "dependencies"},
-		},
-	}
-	if login == "" && accountType == "" {
-		pr["user"] = map[string]any{}
-	}
+	pr["title"] = "renovate[bot] renovate/update"
+	pr["labels"] = []map[string]any{{"name": "dependencies"}}
 	payload, err := json.Marshal(map[string]any{
 		"action":       "synchronize",
 		"sender":       map[string]any{"login": "renovate[bot]", "type": "Bot"},
@@ -477,56 +615,131 @@ func eventJSON(t *testing.T, body, login, accountType, branch string) string {
 	return string(payload)
 }
 
+// eventWithUser — событие с указанными учётной записью автора и веткой.
+func eventWithUser(t *testing.T, body, login, accountType, branch string) string {
+	return eventJSON(t, map[string]any{
+		"body": body,
+		"user": map[string]any{"login": login, "type": accountType},
+		"head": map[string]any{"ref": branch},
+	})
+}
+
 func TestBotExemption(t *testing.T) {
-	// Исключение проверяется на заведомо непригодном body: успех возможен
+	// Исключение проверяется на заведомо непригодном описании: успех возможен
 	// только за счёт сработавшего исключения.
-	bad := "## Цель\nTODO\n"
+	bad := badBody()
 	cases := []struct {
 		name        string
-		login       string
-		accountType string
-		branch      string
+		payload     func(t *testing.T) string
 		wantCode    int
+		wantExempt  bool
+		wantProblem string
 	}{
-		{name: "renovate бот с префиксом", login: "renovate[bot]", accountType: "Bot", branch: "renovate/github-actions", wantCode: 0},
-		{name: "dependabot бот с префиксом", login: "dependabot[bot]", accountType: "Bot", branch: "dependabot/go_modules/x", wantCode: 0},
-		{name: "человек с похожей веткой", login: "someone", accountType: "User", branch: "renovate/fake", wantCode: 1},
-		{name: "бот с чужим префиксом", login: "dependabot[bot]", accountType: "Bot", branch: "renovate/fake", wantCode: 1},
-		{name: "бот на обычной ветке", login: "renovate[bot]", accountType: "Bot", branch: "feat/other", wantCode: 1},
-		{name: "логин бота с неверным регистром", login: "Renovate[bot]", accountType: "Bot", branch: "renovate/x", wantCode: 1},
-		{name: "неполные метаданные без type", login: "renovate[bot]", accountType: "", branch: "renovate/x", wantCode: 1},
-		{name: "неполные метаданные без user", login: "", accountType: "", branch: "renovate/x", wantCode: 1},
+		{
+			name: "бот обновления зависимостей с префиксом",
+			payload: func(t *testing.T) string {
+				return eventWithUser(t, bad, "renovate[bot]", "Bot", "renovate/github-actions")
+			},
+			wantCode:   0,
+			wantExempt: true,
+		},
+		{
+			name: "бот обновления зависимостей Go с префиксом",
+			payload: func(t *testing.T) string {
+				return eventWithUser(t, bad, "dependabot[bot]", "Bot", "dependabot/go_modules/x")
+			},
+			wantCode:   0,
+			wantExempt: true,
+		},
+		{
+			name: "человек с похожей веткой",
+			payload: func(t *testing.T) string {
+				return eventWithUser(t, bad, "someone", "User", "renovate/fake")
+			},
+			wantCode:    1,
+			wantProblem: "## Цель",
+		},
+		{
+			name: "бот с чужим префиксом",
+			payload: func(t *testing.T) string {
+				return eventWithUser(t, bad, "dependabot[bot]", "Bot", "renovate/fake")
+			},
+			wantCode:    1,
+			wantProblem: "## Цель",
+		},
+		{
+			name: "бот на обычной ветке",
+			payload: func(t *testing.T) string {
+				return eventWithUser(t, bad, "renovate[bot]", "Bot", "feat/other")
+			},
+			wantCode:    1,
+			wantProblem: "## Цель",
+		},
+		{
+			name: "логин бота с неверным регистром",
+			payload: func(t *testing.T) string {
+				return eventWithUser(t, bad, "Renovate[bot]", "Bot", "renovate/x")
+			},
+			wantCode:    1,
+			wantProblem: "## Цель",
+		},
+		{
+			name: "неполные метаданные без type",
+			payload: func(t *testing.T) string {
+				return eventWithUser(t, bad, "renovate[bot]", "", "renovate/x")
+			},
+			wantCode:    1,
+			wantProblem: "## Цель",
+		},
+		{
+			name: "пустой объект user",
+			payload: func(t *testing.T) string {
+				return eventJSON(t, map[string]any{
+					"body": bad,
+					"user": map[string]any{},
+					"head": map[string]any{"ref": "renovate/x"},
+				})
+			},
+			wantCode:    1,
+			wantProblem: "## Цель",
+		},
+		{
+			name: "отсутствующее поле user",
+			payload: func(t *testing.T) string {
+				return eventJSON(t, map[string]any{
+					"body": bad,
+					"head": map[string]any{"ref": "renovate/x"},
+				})
+			},
+			wantCode:    1,
+			wantProblem: "## Цель",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			path := writeTemp(t, "event.json", []byte(eventJSON(t, bad, c.login, c.accountType, c.branch)))
+			path := writeTemp(t, "event.json", []byte(c.payload(t)))
 			code, stdout, stderr := runCLI("--event-file", path)
 			if code != c.wantCode {
 				t.Fatalf("код выхода %d, ожидался %d: %q", code, c.wantCode, stderr)
 			}
-			if c.wantCode == 0 {
-				if !strings.Contains(stdout, "формат ручных PR не применяется") {
-					t.Fatalf("исключение сработало молча: stdout=%q", stdout)
-				}
+			// sender события — бот; исключение не должно срабатывать по нему.
+			exempted := strings.Contains(stdout, "формат ручных PR не применяется")
+			if exempted != c.wantExempt {
+				t.Fatalf("признак исключения %v, ожидался %v: stdout=%q", exempted, c.wantExempt, stdout)
+			}
+			if c.wantExempt {
 				if stderr != "" {
 					t.Fatalf("неожиданная диагностика: %q", stderr)
 				}
+				return
+			}
+			if !strings.Contains(stderr, c.wantProblem) {
+				t.Fatalf("нет диагностики %q: %q", c.wantProblem, stderr)
+			}
+			if !strings.Contains(stderr, "заглушку: ## Цель") {
+				t.Fatalf("нет причины отказа по заглушке: %q", stderr)
 			}
 		})
-	}
-}
-
-func TestSenderBotDoesNotExemptHuman(t *testing.T) {
-	path := writeTemp(t, "event.json", []byte(eventJSON(t, badBody(), "someone", "User", "feat/x")))
-	code, stdout, stderr := runCLI("--event-file", path)
-	if code != 1 {
-		t.Fatalf("sender-бот освободил PR человека: код %d", code)
-	}
-	if strings.Contains(stdout, "не применяется") {
-		t.Fatalf("исключение сработало по sender: %q", stdout)
-	}
-	if !strings.Contains(stderr, "## Цель") {
-		t.Fatalf("нет диагностики по разделам: %q", stderr)
 	}
 }
 
@@ -534,12 +747,12 @@ func badBody() string { return "## Цель\nTODO\n" }
 
 func TestModesAgree(t *testing.T) {
 	for name, body := range map[string]string{
-		"корректный":   validBody(),
-		"некорректный": badBody(),
+		"корректное":   validBody(),
+		"некорректное": badBody(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			file := writeTemp(t, "body.md", []byte(body))
-			event := writeTemp(t, "event.json", []byte(eventJSON(t, body, "someone", "User", "feat/x")))
+			event := writeTemp(t, "event.json", []byte(eventWithUser(t, body, "someone", "User", "feat/x")))
 			fileCode, fileOut, fileErr := runCLI("--body-file", file)
 			eventCode, eventOut, eventErr := runCLI("--event-file", event)
 			if fileCode != eventCode {
@@ -565,7 +778,7 @@ func TestSuccessfulCLI(t *testing.T) {
 		t.Fatalf("неожиданная диагностика: %q", stderr)
 	}
 
-	event := writeTemp(t, "event.json", []byte(eventJSON(t, validBody(), "someone", "User", "feat/x")))
+	event := writeTemp(t, "event.json", []byte(eventWithUser(t, validBody(), "someone", "User", "feat/x")))
 	if code, _, stderr := runCLI("--event-file", event); code != 0 {
 		t.Fatalf("режим события: код %d: %q", code, stderr)
 	}
@@ -582,17 +795,6 @@ func TestDiagnosticsDoNotEchoBody(t *testing.T) {
 		t.Fatalf("код выхода %d, ожидался 1", code)
 	}
 	if strings.Contains(stderr, secret) || strings.Contains(stdout, secret) {
-		t.Fatal("диагностика воспроизводит недоверенный body")
-	}
-}
-
-// TestExitCodes проверяет коды выхода, которые возвращает точка входа run.
-func TestExitCodes(t *testing.T) {
-	file := writeTemp(t, "body.md", []byte(badBody()))
-	if code, _, _ := runCLI("--body-file", file); code != 1 {
-		t.Fatalf("код выхода %d, ожидался 1", code)
-	}
-	if code, _, _ := runCLI("--body-file", filepath.Join(t.TempDir(), "нет.md")); code != 2 {
-		t.Fatalf("код выхода %d, ожидался 2", code)
+		t.Fatal("диагностика воспроизводит недоверенное описание")
 	}
 }

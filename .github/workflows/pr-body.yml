@@ -35,7 +35,7 @@ jobs:
         run: go test .github/scripts/pr-body-lint/main.go .github/scripts/pr-body-lint/main_test.go
 
       # Вход проверки — снимок события pull_request, а не запрос актуального
-      # удалённого описания. Тело читает сам валидатор из файла события;
-      # интерполяция body в shell не используется.
+      # удалённого описания. Описание читает сам валидатор из файла события;
+      # подстановка описания в командную оболочку не используется.
       - name: Проверить описание из снимка события
         run: go run .github/scripts/pr-body-lint/main.go --event-file "$GITHUB_EVENT_PATH"

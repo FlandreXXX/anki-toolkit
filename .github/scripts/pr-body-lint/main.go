@@ -1,6 +1,6 @@
 // Программа проверяет структуру описания PR: пять обязательных разделов в
 // установленном относительном порядке, содержательный видимый текст каждого
-// раздела и общий предел 10 000 Unicode code points.
+// раздела и общий предел 10 000 кодовых точек Unicode.
 //
 // Проверяется структура, а не правдивость содержания: никаких HTTP-запросов,
 // токенов, анализа CI-статусов и бенчмарков здесь нет.
@@ -78,7 +78,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return inputError(stderr, err)
 	}
 	if exempt {
-		fmt.Fprintln(stdout, "PR dependency-бота: формат ручных PR не применяется")
+		fmt.Fprintln(stdout, "PR бота обновления зависимостей: формат ручных PR не применяется")
 		return 0
 	}
 	return report(validate(body), stdout, stderr)
@@ -97,7 +97,7 @@ func inputError(stderr io.Writer, err error) int {
 
 func report(problems []string, stdout, stderr io.Writer) int {
 	if len(problems) == 0 {
-		fmt.Fprintln(stdout, "Структура PR body соответствует контракту")
+		fmt.Fprintln(stdout, "Структура описания PR соответствует контракту")
 		return 0
 	}
 	for _, problem := range problems {
@@ -107,10 +107,12 @@ func report(problems []string, stdout, stderr io.Writer) int {
 }
 
 // readTextFile читает файл и отвергает некорректный UTF-8.
+// Собственное сообщение отделено от технической причины: исходную ошибку ОС
+// или стандартной библиотеки Go нельзя терять и нельзя выдавать за перевод.
 func readTextFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("не удалось прочитать %s: %w", path, err)
+		return "", fmt.Errorf("не удалось прочитать файл %s; техническая причина: %w", path, err)
 	}
 	if !utf8.Valid(data) {
 		return "", fmt.Errorf("файл %s содержит некорректный UTF-8", path)
@@ -119,7 +121,7 @@ func readTextFile(path string) (string, error) {
 }
 
 // eventBody извлекает pull_request.body из снимка события. Второй результат
-// означает, что сработало узкое исключение dependency-бота.
+// означает, что сработало узкое исключение бота обновления зависимостей.
 func eventBody(path string) (string, bool, error) {
 	text, err := readTextFile(path)
 	if err != nil {
@@ -127,7 +129,8 @@ func eventBody(path string) (string, bool, error) {
 	}
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(text), &payload); err != nil {
-		return "", false, fmt.Errorf("файл события %s содержит некорректный JSON: %v", path, err)
+		return "", false, fmt.Errorf(
+			"файл события %s содержит некорректный JSON; техническая причина: %v", path, err)
 	}
 	pr, ok := jsonObject(payload["pull_request"])
 	if !ok {
@@ -205,10 +208,13 @@ func automationPR(pr map[string]json.RawMessage) bool {
 
 // validate возвращает детерминированный список нарушений контракта;
 // пустой список означает, что структура соответствует контракту.
+//
+// Переводы строк нормализуются здесь — в начале фактической цепочки проверки,
+// поэтому и подсчёт кодовых точек, и разбор разделов видят один и тот же текст.
 func validate(body string) []string {
 	body = normalizeNewlines(body)
 	if count := utf8.RuneCountInString(body); count > maxBodyPoints {
-		return []string{fmt.Sprintf("Описание PR: %d code points, максимум %d", count, maxBodyPoints)}
+		return []string{fmt.Sprintf("Описание PR: %d кодовых точек, максимум %d", count, maxBodyPoints)}
 	}
 	if strings.TrimSpace(body) == "" {
 		return []string{"Описание PR пустое: нужны обязательные разделы " + headingList(requiredSections)}
@@ -286,7 +292,9 @@ func orderProblems(names []string) []string {
 }
 
 // isPlaceholder принимает за заглушку очевидный шаблон: одна из известных
-// фраз, целиком шаблон вида <причина> или набор таких строк.
+// фраз, целиком шаблон вида <причина> или набор таких строк. Маркер пункта
+// списка сам по себе содержанием не является, поэтому список из одних заглушек
+// тоже считается заглушкой.
 func isPlaceholder(content string) bool {
 	lines := strings.Split(content, "\n")
 	nonEmpty := 0
@@ -307,13 +315,50 @@ func isPlaceholder(content string) bool {
 	return placeholderToken(normalizeToken(strings.Join(lines, " ")))
 }
 
-// normalizeToken приводит строку к сравнимому виду: нижний регистр, сжатые
-// пробелы, снятая разметка и завершающая пунктуация.
+// normalizeToken приводит строку к сравнимому виду: снимает маркер пункта
+// списка и разметку, затем нижний регистр, сжатые пробелы и завершающую
+// пунктуацию.
 func normalizeToken(text string) string {
-	token := strings.Join(strings.Fields(text), " ")
+	token := trimListItem(text)
+	token = strings.Join(strings.Fields(token), " ")
 	token = strings.TrimSpace(strings.Trim(token, "`*_~# \t"))
 	token = strings.TrimSpace(strings.TrimRight(token, ".:;!,"))
 	return strings.ToLower(token)
+}
+
+// trimListItem снимает ведущий маркер маркированного, нумерованного или
+// списка задач вместе с отметкой выполнения.
+func trimListItem(text string) string {
+	rest := strings.TrimLeft(text, " \t")
+	if marker := listMarkerLen(rest); marker > 0 {
+		rest = strings.TrimLeft(rest[marker:], " \t")
+	}
+	for _, box := range []string{"[ ]", "[x]", "[X]"} {
+		if strings.HasPrefix(rest, box) {
+			return strings.TrimLeft(rest[len(box):], " \t")
+		}
+	}
+	return rest
+}
+
+// listMarkerLen возвращает длину маркера пункта списка в начале строки:
+// `- `, `* `, `+ `, `1. `, `1) `; ноль — маркера нет.
+func listMarkerLen(text string) int {
+	if len(text) >= 2 && (text[0] == '-' || text[0] == '*' || text[0] == '+') &&
+		(text[1] == ' ' || text[1] == '\t') {
+		return 1
+	}
+	digits := 0
+	for digits < len(text) && text[digits] >= '0' && text[digits] <= '9' {
+		digits++
+	}
+	if digits == 0 || digits > 9 || digits >= len(text) || (text[digits] != '.' && text[digits] != ')') {
+		return 0
+	}
+	if digits+1 >= len(text) || (text[digits+1] != ' ' && text[digits+1] != '\t') {
+		return 0
+	}
+	return digits + 1
 }
 
 func placeholderToken(token string) bool {
@@ -325,6 +370,9 @@ func placeholderToken(token string) bool {
 		!strings.ContainsAny(token[1:len(token)-1], "<>")
 }
 
+// normalizeNewlines — единственный владелец нормализации переводов строк в
+// цепочке проверки: результат обязан быть до подсчёта лимита и до разбора
+// разделов.
 func normalizeNewlines(body string) string {
 	body = strings.ReplaceAll(body, "\r\n", "\n")
 	return strings.ReplaceAll(body, "\r", "\n")
@@ -340,7 +388,7 @@ func (s section) content() string {
 	return strings.Join(s.lines, "\n")
 }
 
-// fence описывает активный fenced code block.
+// fence описывает активный ограждённый блок кода.
 type fence struct {
 	ch  byte // маркер ограждения: '`' или '~'
 	n   int  // длина маркера открытия
@@ -351,12 +399,14 @@ type parser struct {
 	sections []section
 	fence    *fence
 	comment  bool
+	listCol  int // столбец начала содержимого текущего пункта списка
 }
 
 // parseSections выделяет видимые заголовки `##` и видимый текст их разделов.
+// Ожидает текст с уже нормализованными переводами строк (validate).
 func parseSections(body string) []section {
 	p := &parser{}
-	for line := range strings.SplitSeq(normalizeNewlines(body), "\n") {
+	for line := range strings.SplitSeq(body, "\n") {
 		p.line(line)
 	}
 	return p.sections
@@ -379,22 +429,40 @@ func (p *parser) line(line string) {
 	}
 }
 
-// text обрабатывает строку вне fenced-блока: снимает HTML-комментарии,
+// text обрабатывает строку вне ограждённого блока: снимает HTML-комментарии,
 // отбрасывает код с отступом, цитаты и горизонтальные линии, иначе засчитывает
 // заголовок раздела или текст текущего раздела.
 func (p *parser) text(line string) {
-	line = stripComments(line, &p.comment)
-	if blank(line) || indentWidth(line) >= 4 {
+	if indentWidth(line) >= 4 {
+		// Блок кода с отступом — литеральный контекст: маркер `<!--` в нём не
+		// открывает комментарий. Внутри уже открытого комментария отступ
+		// семантику его закрытия не меняет.
+		if p.comment {
+			stripComments(line, &p.comment)
+		}
 		return
 	}
-	if opening, ok := openFence(line); ok {
-		// Fenced-блок скрывает остаток текста до своего закрытия.
-		p.comment = false
+	if blank(line) {
+		// Пустая строка может продолжать пункт списка, поэтому listCol
+		// сохраняется; непустая строка меньшего отступа пункт завершает.
+		return
+	}
+	if indentWidth(line) < p.listCol {
+		p.listCol = 0
+	}
+	line = stripComments(line, &p.comment)
+	if blank(line) {
+		return
+	}
+	if col, ok := listItemContent(line); ok {
+		p.listCol = col
+	}
+	if opening, ok := openFence(line, p.listCol); ok {
+		// Ограждённый блок скрывает остаток текста до своего закрытия.
 		p.fence = &opening
 		return
 	}
 	if opening, ok := openListFence(line); ok {
-		p.comment = false
 		p.fence = &opening
 		return
 	}
@@ -412,7 +480,9 @@ func (p *parser) text(line string) {
 
 // stripComments убирает HTML-комментарии, включая многострочные и незакрытые:
 // незакрытый комментарий скрывает остаток строки и следующие строки.
-// Вызывается только вне fenced-блоков, поэтому `<!--` в коде остаётся литералом.
+// Строчный код в обратных кавычках — литеральный контекст: `<!--` внутри него
+// комментарий не открывает. Вызывается вне ограждённых блоков и блоков кода с
+// отступом, поэтому маркер в коде остаётся литералом.
 func stripComments(line string, inside *bool) string {
 	var visible strings.Builder
 	rest := line
@@ -427,6 +497,13 @@ func stripComments(line string, inside *bool) string {
 			continue
 		}
 		start := strings.Index(rest, "<!--")
+		if tick := strings.IndexByte(rest, '`'); tick >= 0 && (start < 0 || tick < start) {
+			if end := codeSpanEnd(rest, tick); end > 0 {
+				visible.WriteString(rest[:end])
+				rest = rest[end:]
+				continue
+			}
+		}
 		if start < 0 {
 			visible.WriteString(rest)
 			return visible.String()
@@ -434,6 +511,31 @@ func stripComments(line string, inside *bool) string {
 		visible.WriteString(rest[:start])
 		*inside = true
 		rest = rest[start+4:]
+	}
+}
+
+// codeSpanEnd возвращает позицию сразу после закрывающего маркера строчного
+// кода, начатого в позиции start, либо -1, если маркер не закрыт.
+func codeSpanEnd(text string, start int) int {
+	length := 0
+	for start+length < len(text) && text[start+length] == '`' {
+		length++
+	}
+	from := start + length
+	for {
+		index := strings.Index(text[from:], strings.Repeat("`", length))
+		if index < 0 {
+			return -1
+		}
+		end := from + index
+		next := end
+		for next < len(text) && text[next] == '`' {
+			next++
+		}
+		if next-end == length {
+			return next
+		}
+		from = next
 	}
 }
 
@@ -466,8 +568,29 @@ func leadingSpaces(line string) int {
 	return spaces
 }
 
-// openFence распознаёт открывающий маркер fenced-блока верхнего уровня.
-func openFence(line string) (fence, bool) {
+// listItemContent возвращает столбец начала содержимого пункта списка
+// одноуровневой разметки; второй результат — является ли строка таким пунктом.
+func listItemContent(line string) (int, bool) {
+	pad := leadingSpaces(line)
+	if pad > 3 {
+		return 0, false
+	}
+	marker := listMarkerLen(line[pad:])
+	if marker == 0 {
+		return 0, false
+	}
+	col := pad + marker
+	for col < len(line) && (line[col] == ' ' || line[col] == '\t') {
+		col++
+	}
+	return col, true
+}
+
+// openFence распознаёт открывающий маркер ограждённого блока. Блок с отступом
+// не меньшим, чем начало содержимого текущего пункта списка, принадлежит этому
+// пункту: заголовки внутри него не засчитываются, а сам блок завершается при
+// выходе из пункта.
+func openFence(line string, listCol int) (fence, bool) {
 	pad := leadingSpaces(line)
 	if pad > 3 {
 		return fence{}, false
@@ -476,45 +599,28 @@ func openFence(line string) (fence, bool) {
 	if !ok {
 		return fence{}, false
 	}
+	if listCol > 0 && pad >= listCol {
+		return fence{ch: ch, n: length, col: listCol}, true
+	}
 	return fence{ch: ch, n: length}, true
 }
 
-// openListFence распознаёт fenced-блок, начатый внутри пункта списка:
-// GitHub считает такой блок кодом, а не разделом body.
+// openListFence распознаёт ограждённый блок, начатый в той же строке, что и
+// пункт списка: GitHub считает такой блок кодом, а не разделом описания.
 func openListFence(line string) (fence, bool) {
-	pad := leadingSpaces(line)
-	if pad > 3 {
-		return fence{}, false
-	}
-	rest := line[pad:]
-	marker := 0
-	switch {
-	case marker < len(rest) && (rest[0] == '-' || rest[0] == '*' || rest[0] == '+'):
-		marker = 1
-	default:
-		for marker < len(rest) && rest[marker] >= '0' && rest[marker] <= '9' {
-			marker++
-		}
-		if marker == 0 || marker > 9 || marker >= len(rest) || (rest[marker] != '.' && rest[marker] != ')') {
-			return fence{}, false
-		}
-		marker++
-	}
-	if marker >= len(rest) || (rest[marker] != ' ' && rest[marker] != '\t') {
-		return fence{}, false
-	}
-	for marker < len(rest) && (rest[marker] == ' ' || rest[marker] == '\t') {
-		marker++
-	}
-	ch, length, ok := fenceMarker(rest[marker:])
+	col, ok := listItemContent(line)
 	if !ok {
 		return fence{}, false
 	}
-	return fence{ch: ch, n: length, col: pad + marker}, true
+	ch, length, ok := fenceMarker(line[col:])
+	if !ok {
+		return fence{}, false
+	}
+	return fence{ch: ch, n: length, col: col}, true
 }
 
 // fenceMarker возвращает символ и длину маркера ограждения не короче трёх
-// символов. Info string блока обратной кавычки не может содержать `.
+// символов. Строка информации о блоке в обратных кавычках не может содержать `.
 func fenceMarker(text string) (byte, int, bool) {
 	if len(text) < 3 || (text[0] != '`' && text[0] != '~') {
 		return 0, 0, false
@@ -534,7 +640,7 @@ func fenceMarker(text string) (byte, int, bool) {
 }
 
 // closesFence проверяет закрывающий маркер: тот же символ, не короче
-// открывающего, без info string.
+// открывающего, без строки информации о блоке.
 func closesFence(line string, active fence) bool {
 	text := line
 	if active.col > 0 {
@@ -560,7 +666,7 @@ func closesFence(line string, active fence) bool {
 
 // atxHeading распознаёт заголовок ровно второго уровня: отступ до трёх
 // пробелов, `##` и обязательный пробельный символ. Корректные закрывающие `#`
-// не входят в имя раздела; заголовки `#` и `###` разделами body не считаются.
+// не входят в имя раздела; заголовки `#` и `###` разделами описания не считаются.
 func atxHeading(line string) (string, bool) {
 	pad := leadingSpaces(line)
 	if pad > 3 || pad == len(line) {
