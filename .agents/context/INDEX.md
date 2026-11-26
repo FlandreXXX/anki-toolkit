@@ -19,6 +19,7 @@
 | [`AGENTS.md`](../../AGENTS.md) | постоянные ограничения: язык, объём и полномочия, доказательность проверок, Git и публикация |
 | [`01-PROJECT-MAP.md`](01-PROJECT-MAP.md) | фактическая структура репозитория, точки входа и владельцы |
 | [`03-VERIFICATION.md`](03-VERIFICATION.md) | фактические команды проверок, границы локальной, сетевой и CI-проверки |
+| [`go-best-practices/SKILL.md`](../skills/go-best-practices/SKILL.md) | Go-специфика при проектировании, изменении и ревью: идиомы языка, выбор решений и зависимостей, архитектура, надёжность и производительность |
 | [`git-workflow/SKILL.md`](../skills/git-workflow/SKILL.md) | общая механика ветки, индекса, коммита, push, проверки удалённого SHA, PR, Draft/Ready, merge |
 | [`publication.md`](../skills/git-workflow/references/publication.md) | порядок публикации коммита: ветка, индекс, commit, push, удалённое постусловие, протокол неизвестного результата |
 | [`pr-body.md`](../skills/git-workflow/references/pr-body.md) | содержание описания PR: пять разделов, лимит 10 000 кодовых точек, локальная проверка описания |
