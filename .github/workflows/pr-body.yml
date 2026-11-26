@@ -8,13 +8,19 @@ on:
 
 permissions:
   contents: read
+  # Только чтение PR и его комментариев: сетевой шаг не пишет в GitHub.
+  # /pulls/{number} требует pull-requests, /issues/{number}/comments — issues.
+  pull-requests: read
+  issues: read
 
 jobs:
   pr-body:
     # Стабильное имя проверки: не переименовывать без согласования.
     name: Структура PR
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Пять минут сетевому шагу не хватает при повторах и полной выдаче
+    # комментариев; содержимое PR при этом не интерполируется в командную оболочку.
+    timeout-minutes: 10
     steps:
       - name: Получить код PR
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,14 +34,27 @@ jobs:
           # Go-модуля в репозитории нет, кэшировать нечего.
           cache: false
 
-      # Проверка кандидатной версии: тесты и валидатор берутся из кода PR.
-      # Это не независимый доверенный барьер — PR, меняющий сам валидатор
+      # Обе проверки — кандидатные: тесты и утилиты берутся из кода PR.
+      # Это не независимый доверенный барьер — PR, меняющий сами утилиты
       # или этот рабочий процесс, требует содержательного ревью.
-      - name: Тесты валидатора
+      - name: Тесты линтера описания PR
         run: go test .github/scripts/pr-body-lint/main.go .github/scripts/pr-body-lint/main_test.go
 
       # Вход проверки — снимок события pull_request, а не запрос актуального
-      # удалённого описания. Описание читает сам валидатор из файла события;
+      # удалённого описания. Описание читает сам линтер из файла события;
       # подстановка описания в командную оболочку не используется.
       - name: Проверить описание из снимка события
         run: go run .github/scripts/pr-body-lint/main.go --event-file "$GITHUB_EVENT_PATH"
+
+      - name: Тесты линтера отчёта CodeRabbit
+        run: go test .github/scripts/coderabbit-comment-lint/main.go .github/scripts/coderabbit-comment-lint/main_test.go
+
+      # Read-only сверка опубликованного состояния: PR, его фактический автор и
+      # полная постраничная выдача комментариев верхнего уровня. Токен
+      # передаётся только в окружение этого шага, тело комментариев в командную
+      # оболочку не попадает.
+      # Отсутствие отчёта — допустимое состояние: линтер отличает его от ошибки.
+      - name: Проверить опубликованный отчёт CodeRabbit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: go run .github/scripts/coderabbit-comment-lint/main.go --event-file "$GITHUB_EVENT_PATH"
