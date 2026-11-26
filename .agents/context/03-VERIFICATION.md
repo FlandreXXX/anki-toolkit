@@ -91,7 +91,7 @@ go vet .github/scripts/pr-body-lint/main.go .github/scripts/pr-body-lint/main_te
 go vet .github/scripts/coderabbit-comment-lint/main.go .github/scripts/coderabbit-comment-lint/main_test.go
 ```
 
-Код выхода `go run` не различает вид отказа: при exit `2` валидатора команда
+Код выхода `go run` не различает вид отказа: при коде выхода `2` валидатора команда
 возвращает оболочке `1`. Для различения берите код у собранного бинарного файла
 или читайте диагностику.
 
@@ -109,7 +109,7 @@ go test -count=1 -race .github/scripts/pr-body-lint/main.go .github/scripts/pr-b
 go test -count=1 -race .github/scripts/coderabbit-comment-lint/main.go .github/scripts/coderabbit-comment-lint/main_test.go
 ```
 
-`-race` выполняется при доступности race detector в текущем окружении;
+`-race` выполняется при доступности детектора гонок данных в текущем окружении;
 недоступность `-race` — честно названное ограничение, а не пройденная проверка.
 
 CI запускает те же тесты без `-count=1` — ровно в такой форме:
@@ -153,10 +153,11 @@ check-jsonschema --no-cache --schemafile https://www.coderabbit.ai/integrations/
 выводу команды.
 
 `coderabbit config validate` для этого не используется: `coderabbit config` без
-подкоманды запускает guided setup и может записать файл, а `config apply`
-применяет предложение. Схема V3 — opt-in для GitHub Cloud; локальный CLI её не
-применяет, и настоящий эффект виден только в hosted-ревью. Синтаксическая
-валидность не доказывает, что hosted-ревью действительно запустится.
+подкоманды запускает пошаговую настройку и может записать файл, а `config apply`
+применяет предложение. Схема V3 подключается по выбору для GitHub Cloud; локальный
+CLI её не применяет, и настоящий эффект виден только при серверном ревью.
+Синтаксическая валидность не доказывает, что серверное ревью действительно
+запустится.
 
 ## CI: job `Структура PR`
 
