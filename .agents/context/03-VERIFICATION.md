@@ -89,8 +89,11 @@ go vet .github/scripts/pr-body-lint/main.go .github/scripts/pr-body-lint/main_te
 go vet .github/scripts/coderabbit-comment-lint/main.go .github/scripts/coderabbit-comment-lint/main_test.go
 ```
 
-Тесты — именованными файлами; `-count=1` обязателен локально, иначе результат
-может быть взят из кэша тестов и не относиться к текущей редакции:
+Тесты — именованными файлами. `-count=1` отключает кэш результата, но при
+перечислении `.go`-файлов Go его и так не использует: результат не может быть
+взят от другой сборки, и в CI эти команды без `-count=1` проверяют текущую
+редакцию. Флаг остаётся требованием доказательности локального прогона: он
+делает отсутствие кэша явным, а не подразумеваемым.
 
 ```bash
 go test -count=1 .github/scripts/pr-body-lint/main.go .github/scripts/pr-body-lint/main_test.go

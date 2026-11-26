@@ -158,7 +158,7 @@ var (
 	linkItem     = regexp.MustCompile(`^\s*<([^<>]+)>\s*;\s*rel="([a-z]+)"\s*$`)
 	// singleTag — одиночный полный тег, занимающий строку целиком (HTML-блок
 	// вида 7 по GFM): имя, необязательные атрибуты и закрывающая скобка.
-	singleTag = regexp.MustCompile(`^</?[A-Za-z][A-Za-z0-9-]*(\s[^<>]*)?/?>\s*$`)
+	singleTag = regexp.MustCompile(`^</?[A-Za-z][A-Za-z0-9-]*(?:\s+(?:[^<>"']|"[^"]*"|'[^']*')*)?/?>\s*$`)
 )
 
 // rawTextTags скрывают текст до своего закрывающего тега, а не до пустой строки.
@@ -389,6 +389,15 @@ type viewer struct {
 	// меньшим отступом, и тогда блок тоже заканчивается.
 	htmlCol int
 	listCol int
+	// paragraph — предыдущая видимая строка непустая и не начинает блок:
+	// type-7 HTML не прерывает абзац, поэтому внутри него блок не открывается.
+	paragraph bool
+}
+
+// inParagraph сообщает, что HTML-блок вида 7 нельзя открыть в этой позиции:
+// одиночный тег внутри абзаца остаётся его частью, а не открывает блок.
+func (v *viewer) inParagraph(kind htmlKind) bool {
+	return kind == htmlAnyTag && v.paragraph
 }
 
 // visibleLines размечает строки документа: скрытые блоки заменяются признаком
@@ -483,7 +492,7 @@ func (v *viewer) line(line string) visibleLine {
 	if quoted(line) {
 		return visibleLine{hidden: true}
 	}
-	if kind := htmlBlockStartIn(line, v.listCol); kind != htmlNone {
+	if kind := htmlBlockStartIn(line, v.listCol); kind != htmlNone && !v.inParagraph(kind) {
 		if !closesHTMLBlock(line, kind) {
 			v.html = kind
 			v.htmlCol = v.listCol
@@ -509,6 +518,7 @@ func (v *viewer) line(line string) visibleLine {
 		return visibleLine{text: line}
 	}
 	stripComments(line, &v.comment)
+	v.paragraph = !startsNewBlock(line)
 	return visibleLine{text: line}
 }
 
@@ -689,8 +699,10 @@ func codeSpanEnd(text string, start int) int {
 	}
 }
 
+// blank — пустая строка по GFM: только пробелы и табуляции. Неразрывный
+// пробел U+00A0 пустой строкой не является и HTML-блок не закрывает.
 func blank(line string) bool {
-	return strings.TrimSpace(line) == ""
+	return strings.Trim(line, " \t") == ""
 }
 
 // indentWidth считает ширину ведущего отступа в колонках.
@@ -772,7 +784,10 @@ func indentPrefix(line string) (bytes, cols int) {
 func openFence(line string, listCol int) (fence, bool) {
 	offset, cols := indentPrefix(line)
 	base := 0
-	if listCol > 0 && cols > listCol {
+	// Ограждение, начинающееся ровно на столбце содержимого пункта, принадлежит
+	// пункту: иначе оно считалось бы блочным, а видимый маркер после него
+	// отвергался как скрытый.
+	if listCol > 0 && cols >= listCol {
 		base = listCol
 	}
 	if cols-base > 3 {
@@ -825,18 +840,20 @@ func fenceMarker(text string) (byte, int, bool) {
 // closesFence проверяет закрывающий маркер: тот же символ, не короче
 // открывающего, без строки информации о блоке.
 func closesFence(line string, active fence) bool {
-	text := line
+	// Отступ считается в колонках от начала строки, а не байтах: «\t  » — это
+	// три байта, но шесть колонок, и такой отступ уже не закрывает ограждение
+	// пункта списка.
+	offset, cols := indentPrefix(line)
 	if active.col > 0 {
-		if len(line) < active.col || strings.TrimSpace(line[:active.col]) != "" {
+		if cols < active.col {
 			return false
 		}
-		text = line[active.col:]
+		cols -= active.col
 	}
-	offset, cols := indentPrefix(text)
 	if cols > 3 {
 		return false
 	}
-	text = text[offset:]
+	text := line[offset:]
 	length := 0
 	for length < len(text) && text[length] == active.ch {
 		length++
@@ -1051,22 +1068,36 @@ func checkTable(view []visibleLine) []string {
 // opensTable сообщает, что строка открывает собственную таблицу GFM: над ней
 // нет строки таблицы, которую она продолжала бы.
 func opensTable(texts []string, index int) bool {
-	if index == 0 {
-		return true
-	}
-	if blank(texts[index-1]) || startsNewBlock(texts[index-1]) {
-		return true
-	}
-	// Предыдущая строка — разделитель уже начатой таблицы: её заголовок выше,
-	// а канонический заголовок тогда остаётся телом чужой таблицы.
-	if delimiterRow(texts, index-1) && index >= 2 {
-		if _, ok := tableRow(texts[index-2]); ok {
+	// Таблица GFM заканчивается только на пустой строке или на начале другого
+	// блока. Значит достаточно найти в текущем блоке строку-разделитель выше:
+	// тогда таблица любой ширины ещё открыта, и канонический заголовок остаётся
+	// её телом, а не открывает отчёт из шести столбцов.
+	for above := index - 1; above >= 0; above-- {
+		if blank(texts[above]) || startsNewBlock(texts[above]) {
+			return true
+		}
+		// Разделитель любой ширины: таблица из двух столбцов тоже не даёт
+		// открыть поверх себя отчёт из шести.
+		if anyDelimiterRow(texts[above]) {
 			return false
 		}
 	}
-	// Строка таблицы без разделителя над заголовком таблицей не является:
-	// GFM начинает её только парой «заголовок + разделитель».
-	return !delimiterRow(texts, index-1)
+	return true
+}
+
+// anyDelimiterRow сообщает, что строка — разделитель таблицы GFM любой ширины:
+// хотя бы одна ячейка из дефисов с необязательным выравниванием.
+func anyDelimiterRow(text string) bool {
+	cells, ok := tableRow(text)
+	if !ok || len(cells) == 0 {
+		return false
+	}
+	for _, cell := range cells {
+		if !delimiterCell.MatchString(cell) {
+			return false
+		}
+	}
+	return true
 }
 
 // delimiterRow проверяет строку-разделитель таблицы: шесть ячеек из дефисов с
@@ -1290,7 +1321,10 @@ func (c *apiClient) once(address string) (apiResponse, error) {
 	if !utf8.Valid(data) {
 		return apiResponse{}, &apiError{message: "ответ GitHub API содержит некорректный UTF-8"}
 	}
-	return apiResponse{body: data, link: response.Header.Get("Link")}, nil
+	// HTTP допускает несколько полей Link: rel="last" и rel="next" могут прийти
+	// отдельными строками. Get вернул бы только первое, и пагинация оборвалась
+	// бы на короткой странице.
+	return apiResponse{body: data, link: strings.Join(response.Header.Values("Link"), ",")}, nil
 }
 
 // pullSnapshot — поля PR, которые нужно сверить с событием и между двумя

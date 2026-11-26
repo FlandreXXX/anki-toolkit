@@ -2016,3 +2016,111 @@ func TestPaginationBodyEditedBetweenReads(t *testing.T) {
 		t.Fatalf("отказ по другой причине: %q", stderr)
 	}
 }
+
+// TestBlankIsASCIIOnly — регрессия: неразрывный пробел U+00A0 не является пустой
+// строкой по GFM, поэтому HTML-блок им не закрывается, а таблица внутри блока
+// не становится настоящей.
+func TestBlankIsASCIIOnly(t *testing.T) {
+	report := testMarker + "\n\n<div>\n\u00a0\n" + testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	problems := validateComment(report)
+	if len(problems) == 0 {
+		t.Fatal("таблица внутри HTML-блока после U+00A0 принята за настоящую")
+	}
+	if !strings.Contains(strings.Join(problems, "\n"), "заголовок") {
+		t.Fatalf("отказ по другой причине: %q", problems)
+	}
+}
+
+// TestTypeSevenInsideParagraph — регрессия: одиночный тег внутри абзаца остаётся
+// его частью и не открывает type-7 блок, поэтому следующий за ним маркер виден.
+func TestTypeSevenInsideParagraph(t *testing.T) {
+	report := "Note\n<span>\n" + testMarker + "\n\n" +
+		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	if got := validateComment(report); len(got) != 0 {
+		t.Fatalf("маркер после <span> в абзаце отклонён: %q", got)
+	}
+	// Отдельный одиночный тег блок по-прежнему открывает.
+	hidden := "<span>\n" + testMarker + "\n\n" +
+		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	if got := validateComment(hidden); len(got) == 0 {
+		t.Fatal("одиночный тег после пустой строки не открыл блок")
+	}
+}
+
+// TestQuotedAttributeInSingleTag — регрессия: «>» внутри кавычек не закрывает
+// одиночный тег, поэтому type-7 блок открывается и таблица в нём скрыта.
+func TestQuotedAttributeInSingleTag(t *testing.T) {
+	report := testMarker + "\n\n<span title=\"a>b\">\n" +
+		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	problems := validateComment(report)
+	if len(problems) == 0 {
+		t.Fatal("таблица внутри блока с кавычкой и «>» принята за настоящую")
+	}
+	if !strings.Contains(strings.Join(problems, "\n"), "заголовок") {
+		t.Fatalf("отказ по другой причине: %q", problems)
+	}
+}
+
+// TestOpenTableAnyWidth — регрессия: таблица любой ширины закрывается только
+// пустой строкой или началом блока, поэтому канонический заголовок под ней
+// остаётся телом чужой таблицы.
+func TestOpenTableAnyWidth(t *testing.T) {
+	report := testMarker + "\n\n| a | b |\n| --- | --- |\n| c | d |\n" +
+		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	if got := validateComment(report); len(got) == 0 {
+		t.Fatal("заголовок после данных двухколоночной таблицы принят за собственный")
+	}
+}
+
+// TestFenceClosingIndentColumns — регрессия: закрывающий маркер проверяется по
+// колонкам, а не по байтам, поэтому «\t  ~~~» не закрывает ограждение пункта.
+func TestFenceClosingIndentColumns(t *testing.T) {
+	report := testMarker + "\n\n- ~~~\n\t  ~~~\n  " + testHeader + "\n  " +
+		testDelimiter + "\n  " + testFinding + "\n"
+	problems := validateComment(report)
+	if len(problems) == 0 {
+		t.Fatal("таблица после ложно закрытого ограждения принята за настоящую")
+	}
+	if !strings.Contains(strings.Join(problems, "\n"), "заголовок") {
+		t.Fatalf("отказ по другой причине: %q", problems)
+	}
+}
+
+// TestFenceAtListContentColumn — регрессия: ограждение ровно на столбце
+// содержимого пункта принадлежит пункту, поэтому выход из пункта его закрывает
+// и следующий видимый отчёт не отвергается как скрытый.
+func TestFenceAtListContentColumn(t *testing.T) {
+	report := "- note\n\n  ~~~\n\n" + testMarker + "\n\n" +
+		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	if got := validateComment(report); len(got) != 0 {
+		t.Fatalf("видимый отчёт после ограждения в пункте отклонён: %q", got)
+	}
+}
+
+// TestMultipleLinkFields — регрессия: HTTP допускает несколько полей Link, и
+// rel="next" может прийти не первым. Чтение только первого поля обрывало
+// пагинацию на короткой странице и сообщало об отсутствии отчёта.
+func TestMultipleLinkFields(t *testing.T) {
+	transport, client, _ := newTransport(t, nil)
+	transport.handle = func(request *http.Request) (*http.Response, error) {
+		if isPullRequest(request) {
+			return transport.pull(t, nil), nil
+		}
+		switch page := pageNumber(request); page {
+		case 1:
+			response := transport.page(t, []map[string]any{ordinaryComment(2, "обычный")}, "")
+			// Два отдельных поля: next приходит вторым.
+			response.Header.Add("Link", `<https://api.github.com/repos/`+testRepo+`/issues/`+
+				fmt.Sprint(testPRNumber)+`/comments?per_page=100&page=3>; rel="last"`)
+			response.Header.Add("Link", pageLink(2))
+			return response, nil
+		case 2:
+			return transport.page(t, []map[string]any{markedComment(1, 1, validReport())}, ""), nil
+		}
+		return transport.page(t, nil, ""), nil
+	}
+	code, stdout, stderr := runEvent(t, networkEnv(), client, testEvent(t))
+	if code != 0 || !strings.Contains(stdout, "соответствует контракту") {
+		t.Fatalf("второе поле Link проигнорировано: код %d, %q %q", code, stdout, stderr)
+	}
+}
