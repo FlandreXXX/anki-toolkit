@@ -153,9 +153,11 @@ var (
 	// повреждённом reviewed HEAD.
 	iterationPrefix = regexp.MustCompile(`^[1-9][0-9]*\s*·`)
 	// hexSHA — полный установленный SHA ревизии.
-	hexSHA       = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	repositoryID = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
-	linkItem     = regexp.MustCompile(`^\s*<([^<>]+)>\s*;\s*rel="([a-z]+)"\s*$`)
+	hexSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	// abbreviatedSHA — сокращённый SHA коммита: от 7 до 40 строчных hex-символов.
+	abbreviatedSHA = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
+	repositoryID   = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+	linkItem       = regexp.MustCompile(`^\s*<([^<>]+)>\s*;\s*rel="([a-z]+)"\s*$`)
 	// singleTag — одиночный полный тег, занимающий строку целиком (HTML-блок
 	// вида 7 по GFM): имя, необязательные атрибуты и закрывающая скобка.
 	singleTag = regexp.MustCompile(`^</?[A-Za-z][A-Za-z0-9-]*(?:\s+(?:[^<>"']|"[^"]*"|'[^']*')*)?/?>\s*$`)
@@ -467,6 +469,8 @@ func (v *viewer) line(line string) visibleLine {
 	if blank(line) {
 		// Пустая строка может продолжать пункт списка, поэтому listCol
 		// сохраняется; непустая строка меньшего отступа пункт завершает.
+		// Абзац она завершает всегда, поэтому type-7 ниже открывается.
+		v.paragraph = false
 		return visibleLine{}
 	}
 	if indentWidth(line) < v.listCol {
@@ -1077,12 +1081,35 @@ func opensTable(texts []string, index int) bool {
 			return true
 		}
 		// Разделитель любой ширины: таблица из двух столбцов тоже не даёт
-		// открыть поверх себя отчёт из шести.
-		if anyDelimiterRow(texts[above]) {
+		// открыть поверх себя отчёт из шести. Но пара «заголовок + разделитель»
+		// образует таблицу только при совпадении числа ячеек: иначе GFM
+		// оставляет их простым текстом, и заголовок отчёта свободен.
+		if anyDelimiterRow(texts[above]) && tableStartsAt(texts, above) {
 			return false
 		}
 	}
 	return true
+}
+
+// tableStartsAt сообщает, что строка above — разделитель настоящей таблицы:
+// строка над ним является строкой таблицы с тем же числом ячеек.
+func tableStartsAt(texts []string, above int) bool {
+	if above < 1 {
+		return false
+	}
+	header, ok := tableRow(texts[above-1])
+	if !ok {
+		return false
+	}
+	delimiter, ok := tableRow(texts[above])
+	return ok && len(header) == len(delimiter)
+}
+
+// markerCommitCell допускает SHA маркерного коммита в столбце «Исправление»
+// clean-строки: строчный hex от 7 до 40 символов, в обратных кавычках или без.
+func markerCommitCell(cell string) bool {
+	value := strings.Trim(strings.TrimSpace(cell), "`")
+	return abbreviatedSHA.MatchString(value)
 }
 
 // anyDelimiterRow сообщает, что строка — разделитель таблицы GFM любой ширины:
@@ -1190,6 +1217,14 @@ func checkRows(rows [][]string, lines []int) []string {
 			if iterationRows > 1 {
 				problems = append(problems, fmt.Sprintf(
 					"Строка %d: clean не может сочетаться со строками замечаний одной итерации",
+					lineNumber))
+			}
+			// В «Исправлении» clean-строки — опубликованный маркерный коммит,
+			// а не произвольный текст: существование коммита проверяет
+			// процедура публикации, здесь проверяется форма SHA.
+			if !markerCommitCell(cells[5]) {
+				problems = append(problems, fmt.Sprintf(
+					"Строка %d: clean-строка требует опубликованный SHA маркерного коммита в столбце «Исправление»",
 					lineNumber))
 			}
 		default:
@@ -1340,8 +1375,12 @@ type pullSnapshot struct {
 	// BaseRepoID — числовой идентификатор репозитория назначения. Ноль —
 	// метаданные его не содержат, и тогда каноническая ссылка пагинации
 	// отвергается: принадлежность подтвердить нечем.
-	BaseRepoID  int64
-	Body        string
+	BaseRepoID int64
+	Body       string
+	// State и Draft участвуют в сравнении: закрытие PR или смена Draft/Ready
+	// не меняют ни SHA, ни автора, ни тело, но состояние проверки другое.
+	State       string
+	Draft       bool
 	BodyPresent bool
 }
 
@@ -1460,6 +1499,13 @@ func parsePull(data []byte) (pullSnapshot, error) {
 	if snapshot.Body, snapshot.BodyPresent, err = nullableString(object, "body"); err != nil {
 		return snapshot, errors.New("некорректное тело PR из GitHub API")
 	}
+	if snapshot.State, err = nonEmptyString(object, "state"); err != nil {
+		return snapshot, errors.New("некорректное состояние PR из GitHub API")
+	}
+	snapshot.Draft, err = boolField(object, "draft")
+	if err != nil {
+		return snapshot, errors.New("некорректный признак Draft PR из GitHub API")
+	}
 	return snapshot, nil
 }
 
@@ -1467,19 +1513,15 @@ func parsePull(data []byte) (pullSnapshot, error) {
 // повторы ID и заголовок Link. repositoryID — числовой идентификатор
 // репозитория назначения: он нужен для сверки канонической ссылки пагинации.
 func (c *apiClient) listComments(repository string, number, repositoryID int64) ([]issueComment, error) {
-	comments, pages, err := c.readComments(repository, number, repositoryID)
+	comments, _, err := c.readComments(repository, number, repositoryID)
 	if err != nil {
 		return nil, err
 	}
-	if pages < 2 {
-		// Выдача поместилась в одну страницу: сдвига между страницами быть не
-		// может, повторное чтение ничего не докажет.
-		return comments, nil
-	}
 	// Постраничное чтение не является снимком: удаление комментария между
 	// страницами сдвигает выдачу, и запись может быть пропущена без повтора ID.
-	// Поэтому многостраничная выдача перечитывается целиком и сверяется по
-	// набору ID; расхождение — отказ, а не молчаливый пропуск.
+	// Поэтому выдача перечитывается и сверяется по телу и автору; расхождение —
+	// отказ, а не молчаливый пропуск. Одна страница тоже сверяется: тело могли
+	// отредактировать между первым чтением и последующим чтением PR.
 	again, _, err := c.readComments(repository, number, repositoryID)
 	if err != nil {
 		return nil, err
@@ -1761,6 +1803,19 @@ func jsonObjectField(object map[string]json.RawMessage, key string) (map[string]
 		return nil, errors.New("нет поля")
 	}
 	return jsonObject(raw)
+}
+
+// boolField читает обязательное булево поле.
+func boolField(object map[string]json.RawMessage, key string) (bool, error) {
+	raw, exists := object[key]
+	if !exists {
+		return false, errors.New("нет поля")
+	}
+	var value bool
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false, errors.New("не булево значение")
+	}
+	return value, nil
 }
 
 func nonEmptyString(object map[string]json.RawMessage, key string) (string, error) {

@@ -79,8 +79,10 @@ gofmt -l .github/scripts
 gofmt -l .github/scripts/pr-body-lint/main.go .github/scripts/pr-body-lint/main_test.go
 ```
 
-Пустой вывод означает соответствие; перечисленные файлы — те, что нужно
-отформатировать.
+Пустой вывод при коде выхода `0` означает соответствие; перечисленные файлы —
+те, что нужно отформатировать. Пустой вывод сам по себе ничего не доказывает:
+при синтаксической ошибке `gofmt` пишет её в stderr и завершается ненулевым
+кодом.
 
 Статический разбор — именованными файлами:
 
@@ -88,6 +90,10 @@ gofmt -l .github/scripts/pr-body-lint/main.go .github/scripts/pr-body-lint/main_
 go vet .github/scripts/pr-body-lint/main.go .github/scripts/pr-body-lint/main_test.go
 go vet .github/scripts/coderabbit-comment-lint/main.go .github/scripts/coderabbit-comment-lint/main_test.go
 ```
+
+Код выхода `go run` не различает вид отказа: при exit `2` валидатора команда
+возвращает оболочке `1`. Для различения берите код у собранного бинарного файла
+или читайте диагностику.
 
 Тесты — именованными файлами. `-count=1` отключает кэш результата, но при
 перечислении `.go`-файлов Go его и так не использует: результат не может быть

@@ -1093,7 +1093,9 @@ func pullJSON(t *testing.T, override map[string]any) string {
 			"sha": testBaseSHA, "ref": "main",
 			"repo": map[string]any{"id": testBaseRepoID},
 		},
-		"body": "Описание PR",
+		"body":  "Описание PR",
+		"state": "open",
+		"draft": true,
 	}
 	for key, value := range override {
 		pull[key] = value
@@ -1191,8 +1193,11 @@ func TestRequestContract(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("код выхода %d, ожидался 0: %q", code, stderr)
 	}
+	// Комментарии читаются дважды: одностраничная выдача тоже сверяется,
+	// иначе правка тела между чтением и финальным чтением PR не ловится.
 	want := []string{
 		"https://api.github.com/repos/example/project/pulls/7",
+		"https://api.github.com/repos/example/project/issues/7/comments?per_page=100&page=1",
 		"https://api.github.com/repos/example/project/issues/7/comments?per_page=100&page=1",
 		"https://api.github.com/repos/example/project/pulls/7",
 	}
@@ -1699,8 +1704,8 @@ func TestTransport(t *testing.T) {
 				if code != 0 {
 					t.Fatalf("код выхода %d, ожидался 0: %q", code, stderr)
 				}
-				if len(transport.calls) != 4 {
-					t.Fatalf("запросов %d, ожидалось 4: %q", len(transport.calls), transport.calls)
+				if len(transport.calls) != 5 {
+					t.Fatalf("запросов %d, ожидалось 5: %q", len(transport.calls), transport.calls)
 				}
 				if len(*sleeps) != 1 {
 					t.Fatalf("задержек %d, ожидалась 1: %v", len(*sleeps), *sleeps)
@@ -2122,5 +2127,68 @@ func TestMultipleLinkFields(t *testing.T) {
 	code, stdout, stderr := runEvent(t, networkEnv(), client, testEvent(t))
 	if code != 0 || !strings.Contains(stdout, "соответствует контракту") {
 		t.Fatalf("второе поле Link проигнорировано: код %d, %q %q", code, stdout, stderr)
+	}
+}
+
+// TestParagraphEndsAtBlankLine — регрессия: пустая строка завершает абзац,
+// поэтому type-7 блок после неё открывается и маркер внутри него скрыт, хотя
+// текст абзаца был выше.
+func TestParagraphEndsAtBlankLine(t *testing.T) {
+	report := "Note\n\n<span>\n" + testMarker + "\n\n" +
+		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	problems := validateComment(report)
+	if len(problems) == 0 {
+		t.Fatal("маркер внутри type-7 блока после абзаца принят за видимый")
+	}
+	if !strings.Contains(strings.Join(problems, "\n"), "скрыт") {
+		t.Fatalf("отказ по другой причине: %q", problems)
+	}
+}
+
+// TestMismatchedHeaderDelimiterIsNotTable — регрессия: пара «заголовок +
+// разделитель» образует таблицу только при одинаковом числе ячеек, поэтому
+// заголовок отчёта под такой парой свободен.
+func TestMismatchedHeaderDelimiterIsNotTable(t *testing.T) {
+	report := testMarker + "\n\na | b\n| --- |\n" +
+		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	if got := validateComment(report); len(got) != 0 {
+		t.Fatalf("отчёт под несовпадающей парой отклонён: %q", got)
+	}
+	// Совпадающая пара по-прежнему означает открытую таблицу.
+	open := testMarker + "\n\n| a | b |\n| --- | --- |\n| c | d |\n" +
+		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	if got := validateComment(open); len(got) == 0 {
+		t.Fatal("заголовок под настоящей таблицей принят за собственный")
+	}
+}
+
+// TestCleanRowRequiresMarkerCommit — регрессия: clean-строка требует SHA
+// маркерного коммита, а не произвольный текст в «Исправлении».
+func TestCleanRowRequiresMarkerCommit(t *testing.T) {
+	bad := reportOf("| 1 · `aaaaaaa` | — | — | 0 замечаний | clean | not published |")
+	if got := validateComment(bad); len(got) == 0 {
+		t.Fatal("clean-строка без SHA маркерного коммита принята")
+	}
+	for _, good := range []string{"`bbbbbbb`", "bbbbbbb", "`0123456789abcdef0123456789abcdef01234567`"} {
+		row := "| 1 · `aaaaaaa` | — | — | 0 замечаний | clean | " + good + " |"
+		if got := validateComment(reportOf(row)); len(got) != 0 {
+			t.Fatalf("clean-строка с SHA %q отклонена: %q", good, got)
+		}
+	}
+}
+
+// TestPullStateCompared — регрессия: смена состояния PR при неизменных SHA,
+// авторе и теле обнаруживается сравнением снимков.
+func TestPullStateCompared(t *testing.T) {
+	first := pullSnapshot{Number: 1, AuthorID: 1, HeadSHA: testSHA, State: "open", Draft: true}
+	changed := first
+	changed.Draft = false
+	if changed == first {
+		t.Fatal("снимки с разным Draft сравнились равными")
+	}
+	closed := first
+	closed.State = "closed"
+	if closed == first {
+		t.Fatal("снимки с разным State сравнились равными")
 	}
 }
