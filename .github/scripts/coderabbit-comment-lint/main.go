@@ -499,8 +499,15 @@ func (v *viewer) line(line string) visibleLine {
 	}
 	// HTML-комментарий, открытый в середине видимой строки, не меняет её
 	// разметку: по GFM границы ячеек таблицы определяются раньше встроенной
-	// разметки. Учитывается только состояние комментария для следующих строк;
-	// содержимое комментария внутри ячейки скрывается при проверке непустоты.
+	// разметки. Внутри строки таблицы встроенная разметка разбирается отдельно
+	// в каждой ячейке, поэтому незакрытый «<!--» в ячейке не скрывает
+	// следующую строку; содержимое комментария внутри ячейки скрывается при
+	// проверке непустоты.
+	if _, isRow := tableRow(line); isRow {
+		local := false
+		stripComments(line, &local)
+		return visibleLine{text: line}
+	}
 	stripComments(line, &v.comment)
 	return visibleLine{text: line}
 }
@@ -521,8 +528,8 @@ var blockTags = []string{
 // htmlNone — строка HTML-блок не открывает. Учитывается не более трёх пробелов
 // отступа.
 func htmlBlockStart(line string) htmlKind {
-	pad := leadingSpaces(line)
-	if pad > 3 {
+	pad, cols := indentPrefix(line)
+	if cols > 3 {
 		return htmlNone
 	}
 	return htmlBlockStartText(line[pad:])
@@ -537,8 +544,8 @@ func htmlBlockStartIn(line string, listCol int) htmlKind {
 	if col, ok := listItemContent(line); ok {
 		return htmlBlockStartText(line[col:])
 	}
-	pad := leadingSpaces(line)
-	if pad < listCol || pad > listCol+3 {
+	pad, cols := indentPrefix(line)
+	if cols < listCol || cols > listCol+3 {
 		return htmlNone
 	}
 	return htmlBlockStartText(line[pad:])
@@ -686,29 +693,10 @@ func blank(line string) bool {
 	return strings.TrimSpace(line) == ""
 }
 
-// indentWidth считает ширину ведущего отступа; табуляция приблизительно равна
-// четырём пробелам, поэтому строка с ведущей табуляцией считается код-блоком.
+// indentWidth считает ширину ведущего отступа в колонках.
 func indentWidth(line string) int {
-	width := 0
-	for index := 0; index < len(line); index++ {
-		switch line[index] {
-		case ' ':
-			width++
-		case '\t':
-			width += 4
-		default:
-			return width
-		}
-	}
-	return width
-}
-
-func leadingSpaces(line string) int {
-	spaces := 0
-	for spaces < len(line) && line[spaces] == ' ' {
-		spaces++
-	}
-	return spaces
+	_, cols := indentPrefix(line)
+	return cols
 }
 
 // listItemContent возвращает столбец начала содержимого пункта списка
@@ -719,7 +707,7 @@ func leadingSpaces(line string) int {
 // иначе ожидаемый отступ раздувается и скрытый в коде текст принимается за
 // видимый.
 func listItemContent(line string) (int, bool) {
-	pad := leadingSpaces(line)
+	pad, _ := indentPrefix(line)
 	if pad > 3 {
 		return 0, false
 	}
@@ -760,16 +748,37 @@ func listMarkerLen(text string) int {
 // openFence распознаёт открывающий маркер ограждённого блока. Допустимый отступ
 // отсчитывается от начала содержимого текущего пункта списка, если блок ему
 // принадлежит.
+// indentPrefix возвращает длину байтового префикса из пробелов и табуляций и
+// его ширину в колонках: табуляция идёт до следующей позиции, кратной четырём.
+// Байтовый префикс и ширина различаются, поэтому отступ нельзя считать только
+// по числу байтов: «  \t» — три байта, но четыре колонки.
+func indentPrefix(line string) (bytes, cols int) {
+	for bytes < len(line) {
+		switch line[bytes] {
+		case ' ':
+			cols++
+		case '\t':
+			cols += 4 - cols%4
+		default:
+			return bytes, cols
+		}
+		bytes++
+	}
+	return bytes, cols
+}
+
+// openFence распознаёт открывающее ограждение с учётом столбца содержимого
+// текущего пункта списка.
 func openFence(line string, listCol int) (fence, bool) {
-	pad := leadingSpaces(line)
+	offset, cols := indentPrefix(line)
 	base := 0
-	if listCol > 0 && pad >= listCol {
+	if listCol > 0 && cols > listCol {
 		base = listCol
 	}
-	if pad-base > 3 {
+	if cols-base > 3 {
 		return fence{}, false
 	}
-	ch, length, ok := fenceMarker(line[pad:])
+	ch, length, ok := fenceMarker(line[offset:])
 	if !ok {
 		return fence{}, false
 	}
@@ -823,11 +832,11 @@ func closesFence(line string, active fence) bool {
 		}
 		text = line[active.col:]
 	}
-	pad := leadingSpaces(text)
-	if pad > 3 {
+	offset, cols := indentPrefix(text)
+	if cols > 3 {
 		return false
 	}
-	text = text[pad:]
+	text = text[offset:]
 	length := 0
 	for length < len(text) && text[length] == active.ch {
 		length++
@@ -841,8 +850,8 @@ func closesFence(line string, active fence) bool {
 // quoted сообщает, что строка продолжает блок-цитату: её текст невидим для
 // контракта.
 func quoted(line string) bool {
-	pad := leadingSpaces(line)
-	return pad < 4 && pad < len(line) && line[pad] == '>'
+	offset, cols := indentPrefix(line)
+	return cols < 4 && offset < len(line) && line[offset] == '>'
 }
 
 // tableRow разбирает строку таблицы GFM; второй результат — строка вообще может
@@ -1045,12 +1054,19 @@ func opensTable(texts []string, index int) bool {
 	if index == 0 {
 		return true
 	}
-	previous := texts[index-1]
-	if blank(previous) || startsNewBlock(previous) {
+	if blank(texts[index-1]) || startsNewBlock(texts[index-1]) {
 		return true
 	}
-	// Разделитель предыдущей таблицы: «|---|» и подобное.
-	return delimiterRow(texts, index-1)
+	// Предыдущая строка — разделитель уже начатой таблицы: её заголовок выше,
+	// а канонический заголовок тогда остаётся телом чужой таблицы.
+	if delimiterRow(texts, index-1) && index >= 2 {
+		if _, ok := tableRow(texts[index-2]); ok {
+			return false
+		}
+	}
+	// Строка таблицы без разделителя над заголовком таблицей не является:
+	// GFM начинает её только парой «заголовок + разделитель».
+	return !delimiterRow(texts, index-1)
 }
 
 // delimiterRow проверяет строку-разделитель таблицы: шесть ячеек из дефисов с
@@ -1434,23 +1450,28 @@ func (c *apiClient) listComments(repository string, number, repositoryID int64) 
 	if err != nil {
 		return nil, err
 	}
-	if !sameCommentIDs(comments, again) {
+	if !sameComments(comments, again) {
 		return nil, errors.New("выдача комментариев изменилась во время постраничного чтения")
 	}
 	return comments, nil
 }
 
-// sameCommentIDs сравнивает две выдачи по набору идентификаторов.
-func sameCommentIDs(first, second []issueComment) bool {
+// sameComments сравнивает две выдачи по тому, что использует проверка: набор
+// ID, тело и автор. Совпадения ID недостаточно: автор может отредактировать
+// отчёт на невалидный между чтениями, и тогда успех объявлялся бы по устаревшему
+// телу, хотя второе чтение видело уже другое.
+func sameComments(first, second []issueComment) bool {
 	if len(first) != len(second) {
 		return false
 	}
-	firstIDs := make(map[int64]bool, len(first))
+	byID := make(map[int64]issueComment, len(first))
 	for _, comment := range first {
-		firstIDs[comment.ID] = true
+		byID[comment.ID] = comment
 	}
 	for _, comment := range second {
-		if !firstIDs[comment.ID] {
+		previous, ok := byID[comment.ID]
+		if !ok || previous.Body != comment.Body ||
+			previous.UserID != comment.UserID || previous.HasUser != comment.HasUser {
 			return false
 		}
 	}

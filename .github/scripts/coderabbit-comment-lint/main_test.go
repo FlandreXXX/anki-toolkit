@@ -1919,3 +1919,100 @@ func TestPaginationShiftedBetweenReads(t *testing.T) {
 		t.Fatalf("отказ по другой причине: %q", stderr)
 	}
 }
+
+// TestTabStopIndent — регрессия: табуляция в отступе идёт до следующей позиции,
+// кратной четырём, а не «плюс четыре». Иначе «  \t```» внутри пункта списка
+// считался бы кодом с отступом и таблица внутри ограждения принималась бы за
+// настоящую, хотя GitHub рисует её кодом.
+func TestTabStopIndent(t *testing.T) {
+	report := testMarker + "\n\n- Example\n\n  \t```text\n  " + testHeader + "\n  " +
+		testDelimiter + "\n  " + testCleanRow + "\n  ```\n"
+	problems := validateComment(report)
+	if len(problems) == 0 {
+		t.Fatal("таблица внутри ограждения с табом принята за настоящую")
+	}
+	if !strings.Contains(strings.Join(problems, "\n"), "заголовок") {
+		t.Fatalf("отказ по другой причине: %q", problems)
+	}
+}
+
+// TestHeadingContinuesOpenTable — регрессия: канонический заголовок, стоящий
+// сразу после строки-разделителя чужой таблицы, остаётся её телом, а не
+// открывает отчёт.
+func TestHeadingContinuesOpenTable(t *testing.T) {
+	report := testMarker + "\n\n| a | b | c | d | e | f |\n| --- | --- | --- | --- | --- | --- |\n" +
+		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	if got := validateComment(report); len(got) == 0 {
+		t.Fatal("заголовок, продолжающий чужую таблицу, принят за собственный")
+	}
+	// Пустая строка между таблицами по-прежнему разделяет их.
+	allowed := testMarker + "\n\n| a | b | c | d | e | f |\n| --- | --- | --- | --- | --- | --- |\n\n" +
+		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	if got := validateComment(allowed); len(got) != 0 {
+		t.Fatalf("отдельная таблица после пустой строки отклонена: %q", got)
+	}
+}
+
+// TestInlineCommentInsideCell — регрессия: незакрытый «<!--» в ячейке не
+// скрывает следующую строку таблицы: встроенная разметка разбирается отдельно
+// в каждой ячейке, поэтому неканоническое решение ниже обязано проверяться.
+func TestInlineCommentInsideCell(t *testing.T) {
+	report := reportOf(
+		"| 1 · `aaaaaaa` | major | `a.go` | Example <!-- | confirmed | исправлено |",
+		"| 2 · `abcdef1` | minor | `b.go` | эффект | fixed | исправлено |",
+	)
+	problems := validateComment(report)
+	if len(problems) == 0 {
+		t.Fatal("неканоническое решение скрыто комментарием в ячейке")
+	}
+	if !strings.Contains(strings.Join(problems, "\n"), "неканоническое") {
+		t.Fatalf("отказ по другой причине: %q", problems)
+	}
+}
+
+// TestPaginationBodyEditedBetweenReads — регрессия: автор может отредактировать
+// отчёт на невалидный между двумя чтениями, не меняя ID. Сверка по набору ID
+// такой случай пропускала и объявляла успех по устаревшему телу.
+func TestPaginationBodyEditedBetweenReads(t *testing.T) {
+	row := fmt.Sprintf("| 1 · `%s` | major | `a.go` | эффект | confirmed | исправлено |", testSHA[:7])
+	valid := validReport()
+	// То же самое, но с другой строкой данных: тело отличается, ID прежний.
+	invalid := reportOf(row)
+	if valid == invalid {
+		t.Fatal("тестовые тела совпали, регрессия ничего не проверяет")
+	}
+	first := make([]map[string]any, 0, 100)
+	for index := 1; index <= 99; index++ {
+		first = append(first, ordinaryComment(int64(1000+index), fmt.Sprintf("запись %d", index)))
+	}
+	first = append(first, markedComment(5000, 1, valid))
+	edited := append(append([]map[string]any{}, first[:len(first)-1]...), markedComment(5000, 1, invalid))
+	reads := 0
+	transport, client, _ := newTransport(t, nil)
+	transport.handle = func(request *http.Request) (*http.Response, error) {
+		if isPullRequest(request) {
+			return transport.pull(t, nil), nil
+		}
+		current := first
+		if reads > 0 {
+			current = edited
+		}
+		switch page := pageNumber(request); page {
+		case 1:
+			return transport.page(t, current[:100], pageLink(2)), nil
+		case 2:
+			if reads == 0 {
+				reads++
+			}
+			return transport.page(t, current[100:], ""), nil
+		}
+		return transport.page(t, nil, ""), nil
+	}
+	code, _, stderr := runEvent(t, networkEnv(), client, testEvent(t))
+	if code == 0 {
+		t.Fatalf("правка тела между чтениями принята за полный скан: %q", stderr)
+	}
+	if !strings.Contains(stderr, "изменилась") {
+		t.Fatalf("отказ по другой причине: %q", stderr)
+	}
+}
