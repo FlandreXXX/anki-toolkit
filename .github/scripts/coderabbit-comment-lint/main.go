@@ -166,7 +166,7 @@ var (
 // rawTextTags скрывают текст до своего закрывающего тега, а не до пустой строки.
 var rawTextTags = map[string]bool{"script": true, "pre": true, "textarea": true, "style": true}
 
-// htmlEndTags — закрывающие теги, завершающие блок raw-текста. По GFM имя
+// htmlEndTags — закрывающие теги, завершающие блок необработанного HTML. По GFM имя
 // закрывающего тега не обязано совпадать с открывающим.
 var htmlEndTags = []string{"</script>", "</pre>", "</textarea>", "</style>"}
 
@@ -355,8 +355,12 @@ func checkMarker(lines []string, view []visibleLine) []string {
 // по GFM границы ячеек определяются раньше разбора встроенной разметки, поэтому
 // HTML-комментарий внутри строки не может ни спрятать, ни создать границу.
 type visibleLine struct {
-	text   string
-	hidden bool
+	text       string
+	cells      []string
+	hidden     bool
+	table      bool
+	tableStart bool
+	blockStart bool
 }
 
 // fence описывает активный ограждённый блок.
@@ -391,15 +395,13 @@ type viewer struct {
 	// меньшим отступом, и тогда блок тоже заканчивается.
 	htmlCol int
 	listCol int
-	// paragraph — предыдущая видимая строка непустая и не начинает блок:
-	// type-7 HTML не прерывает абзац, поэтому внутри него блок не открывается.
+	// paragraph — текущий абзац; HTML-блок седьмого вида не может его прервать.
 	paragraph bool
-}
-
-// inParagraph сообщает, что HTML-блок вида 7 нельзя открыть в этой позиции:
-// одиночный тег внутри абзаца остаётся его частью, а не открывает блок.
-func (v *viewer) inParagraph(kind htmlKind) bool {
-	return kind == htmlAnyTag && v.paragraph
+	// tableBlock — подтверждённая таблица GFM, завершающая абзац.
+	tableBlock bool
+	// quoteParagraph — абзац внутри блока-цитаты, который может продолжиться
+	// строками без маркера «>».
+	quoteParagraph bool
 }
 
 // visibleLines размечает строки документа: скрытые блоки заменяются признаком
@@ -407,21 +409,28 @@ func (v *viewer) inParagraph(kind htmlKind) bool {
 // блока, считается скрытой целиком, даже если блок закрывается на ней же: так
 // неоднозначный случай решается отказом, а не догадкой.
 func visibleLines(lines []string) []visibleLine {
-	state := &viewer{}
 	view := make([]visibleLine, len(lines))
 	for index, line := range lines {
-		view[index] = state.line(line)
+		view[index] = visibleMarkdownLine(line)
+	}
+	for index := 0; index+1 < len(view); index++ {
+		view[index].tableStart = hasMatchingTableDelimiter(view[index], view[index+1])
+	}
+	state := &viewer{}
+	for index, line := range lines {
+		view[index] = state.line(line, view[index])
 	}
 	return view
 }
 
-func (v *viewer) line(line string) visibleLine {
+func (v *viewer) line(line string, parsed visibleLine) visibleLine {
 	if v.fence != nil {
+		v.paragraph = false
 		active := *v.fence
 		if active.col > 0 && !blank(line) && indentWidth(line) < active.col {
 			// Пункт списка закончился раньше закрывающего маркера.
 			v.fence = nil
-			return v.line(line)
+			return v.line(line, parsed)
 		}
 		if closesFence(line, active) {
 			v.fence = nil
@@ -429,6 +438,7 @@ func (v *viewer) line(line string) visibleLine {
 		return visibleLine{hidden: true}
 	}
 	if v.html != htmlNone {
+		v.paragraph = false
 		// HTML-блок, открытый внутри пункта списка, заканчивается вместе с
 		// пунктом: строка меньшего отступа уже вне контейнера и разбирается
 		// заново. Без этого маркер после «- <div>note</div>» считался бы
@@ -436,13 +446,16 @@ func (v *viewer) line(line string) visibleLine {
 		if v.htmlCol > 0 && !blank(line) && indentWidth(line) < v.htmlCol {
 			v.html = htmlNone
 			v.htmlCol = 0
-			return v.line(line)
+			return v.line(line, parsed)
 		}
 		if closesHTMLBlock(line, v.html) {
 			v.html = htmlNone
 			v.htmlCol = 0
 		}
 		return visibleLine{hidden: true}
+	}
+	if v.tableBlock && (blank(line) || parsed.blockStart) {
+		v.tableBlock = false
 	}
 	if v.comment {
 		if !blank(line) {
@@ -451,9 +464,9 @@ func (v *viewer) line(line string) visibleLine {
 			// начинают новый блок, поэтому комментарий на них не
 			// распространяется: иначе «Note <!--» съедал бы открывающее «~~~»
 			// и таблица внутри кода принималась бы за настоящую.
-			if startsNewBlock(line) {
+			if parsed.blockStart {
 				v.comment = false
-				return v.line(line)
+				return v.line(line, parsed)
 			}
 			if strings.Contains(line, "-->") {
 				v.comment = false
@@ -469,15 +482,28 @@ func (v *viewer) line(line string) visibleLine {
 	if blank(line) {
 		// Пустая строка может продолжать пункт списка, поэтому listCol
 		// сохраняется; непустая строка меньшего отступа пункт завершает.
-		// Абзац она завершает всегда, поэтому type-7 ниже открывается.
+		// Абзац она завершает всегда, поэтому HTML-блок седьмого вида ниже открывается.
 		v.paragraph = false
+		v.quoteParagraph = false
 		return visibleLine{}
 	}
-	if indentWidth(line) < v.listCol {
-		v.listCol = 0
+	indent := indentWidth(line)
+	wasParagraph := v.paragraph
+	lazyQuoteContinuation := v.quoteParagraph && paragraphContinuation(line, parsed)
+	if !lazyQuoteContinuation {
+		v.quoteParagraph = false
 	}
-	if col, ok := listItemContent(line); ok {
-		v.listCol = col
+	// Продолжение без отступа остаётся в абзаце пункта, поэтому строка таблицы
+	// здесь является обычным текстом.
+	lazyListContinuation := indent < v.listCol && wasParagraph && !parsed.blockStart
+	if indent < v.listCol && !lazyListContinuation {
+		v.listCol = 0
+		wasParagraph = false
+	}
+	v.paragraph = false
+	content, listItem := listItemContent(line)
+	if listItem {
+		v.listCol = content.column
 	}
 	// Код с отступом отсчитывается от начала содержимого текущего пункта
 	// списка: вне списка это четыре пробела, внутри пункта отступ продолжения
@@ -494,9 +520,13 @@ func (v *viewer) line(line string) visibleLine {
 		return visibleLine{hidden: true}
 	}
 	if quoted(line) {
+		content := blockQuoteContent(line)
+		v.quoteParagraph = !blank(content) && !startsNewBlock(content)
+		v.paragraph = false
 		return visibleLine{hidden: true}
 	}
-	if kind := htmlBlockStartIn(line, v.listCol); kind != htmlNone && !v.inParagraph(kind) {
+	kind := htmlBlockStartIn(line, v.listCol)
+	if kind != htmlNone && !(kind == htmlAnyTag && wasParagraph) {
 		if !closesHTMLBlock(line, kind) {
 			v.html = kind
 			v.htmlCol = v.listCol
@@ -516,14 +546,59 @@ func (v *viewer) line(line string) visibleLine {
 	// в каждой ячейке, поэтому незакрытый «<!--» в ячейке не скрывает
 	// следующую строку; содержимое комментария внутри ячейки скрывается при
 	// проверке непустоты.
-	if _, isRow := tableRow(line); isRow {
-		local := false
-		stripComments(line, &local)
-		return visibleLine{text: line}
+	if lazyListContinuation || lazyQuoteContinuation {
+		parsed.cells = nil
+		parsed.table = false
+		parsed.tableStart = false
+	}
+	if v.tableBlock {
+		v.paragraph = false
+		return parsed
+	}
+	if parsed.tableStart {
+		v.tableBlock = true
+		v.paragraph = false
+		return parsed
+	}
+	if parsed.table {
+		v.paragraph = wasParagraph ||
+			listItemStartsParagraph(line, content, listItem) || !parsed.blockStart
+		return parsed
+	}
+	if lazyQuoteContinuation {
+		v.paragraph = false
+		return parsed
 	}
 	stripComments(line, &v.comment)
-	v.paragraph = !startsNewBlock(line)
-	return visibleLine{text: line}
+	v.paragraph = kind == htmlAnyTag && wasParagraph ||
+		listItemStartsParagraph(line, content, listItem) || !parsed.blockStart
+	return parsed
+}
+
+func blockQuoteContent(line string) string {
+	offset, _ := indentPrefix(line)
+	content := line[offset+1:]
+	if len(content) > 0 && (content[0] == ' ' || content[0] == '\t') {
+		content = content[1:]
+	}
+	return content
+}
+
+func paragraphContinuation(line string, parsed visibleLine) bool {
+	return indentWidth(line) < 4 && !blank(line) && !parsed.blockStart
+}
+
+func listItemStartsParagraph(line string, content listContent, ok bool) bool {
+	if !ok {
+		return false
+	}
+	rest := line[content.byteOffset:]
+	return !blank(rest) && content.remainingIndent+indentWidth(rest) < 4 && !startsNewBlock(rest)
+}
+
+func visibleMarkdownLine(line string) visibleLine {
+	cells, table := tableRow(line)
+	return visibleLine{text: line, cells: cells, table: table, blockStart: startsNewBlock(line)}
 }
 
 // blockTags — имена тегов, открывающих HTML-блок вида 6 по GFM.
@@ -551,12 +626,16 @@ func htmlBlockStart(line string) htmlKind {
 
 // htmlBlockStartIn распознаёт открытие HTML-блока внутри текущего контейнера.
 // В пункте списка содержимое начинается сразу за маркером, поэтому «- <pre>»
-// открывает raw-блок, который GitHub рисует как скрытый код; пропуск этого
+// открывает блок необработанного HTML, который GitHub скрывает; пропуск этого
 // случая принимал спрятанную в нём таблицу за настоящую. Вне пункта блок
 // начинается с отступом не более трёх пробелов от столбца содержимого listCol.
 func htmlBlockStartIn(line string, listCol int) htmlKind {
-	if col, ok := listItemContent(line); ok {
-		return htmlBlockStartText(line[col:])
+	if content, ok := listItemContent(line); ok {
+		rest := line[content.byteOffset:]
+		if content.remainingIndent+indentWidth(rest) > 3 {
+			return htmlNone
+		}
+		return htmlBlockStartText(rest)
 	}
 	pad, cols := indentPrefix(line)
 	if cols < listCol || cols > listCol+3 {
@@ -603,7 +682,7 @@ func startsDeclaration(rest string) bool {
 
 // hasTagPrefix сообщает, что текст начинается с имени тега и за именем сразу
 // идёт допустимый разделитель: пробел, табуляция, конец строки или «>». Форма
-// «/>» допустима только для блочных тегов, а не для raw-текста. Так «<pre» не
+// «/>» допустима только для блочных тегов, а не для необработанного HTML. Так «<pre» не
 // путается с «<prefix>».
 func hasTagPrefix(lower, prefix string, selfClosing bool) bool {
 	if !strings.HasPrefix(lower, prefix) {
@@ -715,30 +794,56 @@ func indentWidth(line string) int {
 	return cols
 }
 
-// listItemContent возвращает столбец начала содержимого пункта списка
-// одноуровневой разметки; второй результат — является ли строка таким пунктом.
+type listContent struct {
+	byteOffset      int
+	column          int
+	remainingIndent int
+}
+
+// listItemContent возвращает позицию содержимого пункта списка в байтах и
+// столбцах: срез строки использует первое значение, граница контейнера — второе.
 //
 // Если пункт начинается с блока кода с отступом (пять и более пробелов после
 // маркера), GFM отводит пункту ровно один пробел, а остаток считает кодом:
 // иначе ожидаемый отступ раздувается и скрытый в коде текст принимается за
 // видимый.
-func listItemContent(line string) (int, bool) {
-	pad, _ := indentPrefix(line)
-	if pad > 3 {
-		return 0, false
+func listItemContent(line string) (listContent, bool) {
+	pad, column := indentPrefix(line)
+	if column > 3 {
+		return listContent{}, false
 	}
 	marker := listMarkerLen(line[pad:])
 	if marker == 0 {
-		return 0, false
+		return listContent{}, false
 	}
-	spaces := 0
-	for pad+marker+spaces < len(line) && (line[pad+marker+spaces] == ' ' || line[pad+marker+spaces] == '\t') {
-		spaces++
+	content := listContent{byteOffset: pad + marker, column: column + marker}
+	markerColumn := content.column
+	for content.byteOffset < len(line) {
+		switch line[content.byteOffset] {
+		case ' ':
+			content.column++
+		case '\t':
+			content.column += 4 - content.column%4
+		default:
+			if content.column-markerColumn > 4 {
+				return listContentAfterOneSpace(line, pad, marker, markerColumn), true
+			}
+			return content, true
+		}
+		content.byteOffset++
 	}
-	if spaces >= 5 {
-		return pad + marker + 1, true
+	if content.column-markerColumn > 4 {
+		return listContentAfterOneSpace(line, pad, marker, markerColumn), true
 	}
-	return pad + marker + spaces, true
+	return content, true
+}
+
+func listContentAfterOneSpace(line string, pad, marker, column int) listContent {
+	remaining := 0
+	if line[pad+marker] == '\t' {
+		remaining = 3 - column%4
+	}
+	return listContent{byteOffset: pad + marker + 1, column: column + 1, remainingIndent: remaining}
 }
 
 // listMarkerLen возвращает длину маркера пункта списка в начале текста:
@@ -810,15 +915,19 @@ func openFence(line string, listCol int) (fence, bool) {
 // openListFence распознаёт ограждённый блок, начатый в той же строке, что и
 // пункт списка.
 func openListFence(line string) (fence, bool) {
-	col, ok := listItemContent(line)
+	content, ok := listItemContent(line)
 	if !ok {
 		return fence{}, false
 	}
-	ch, length, ok := fenceMarker(line[col:])
+	rest := line[content.byteOffset:]
+	if content.remainingIndent+indentWidth(rest) > 3 {
+		return fence{}, false
+	}
+	ch, length, ok := fenceMarker(rest)
 	if !ok {
 		return fence{}, false
 	}
-	return fence{ch: ch, n: length, col: col}, true
+	return fence{ch: ch, n: length, col: content.column}, true
 }
 
 // fenceMarker возвращает символ и длину маркера ограждения не короче трёх
@@ -879,20 +988,23 @@ func quoted(line string) bool {
 // быть строкой таблицы. Пустая строка завершает таблицу, отступ от четырёх
 // пробелов делает строку кодом, внешние «|» необязательны.
 func tableRow(text string) ([]string, bool) {
-	if blank(text) || indentWidth(text) > 3 || !hasUnescapedPipe(text) {
+	if blank(text) || indentWidth(text) > 3 {
 		return nil, false
 	}
-	cells := splitCells(text)
-	if len(cells) == 0 {
+	cells := splitUnescapedPipes(text)
+	if len(cells) == 1 {
 		return nil, false
+	}
+	if strings.TrimSpace(cells[0]) == "" {
+		cells = cells[1:]
+	}
+	if len(cells) > 0 && strings.TrimSpace(cells[len(cells)-1]) == "" {
+		cells = cells[:len(cells)-1]
+	}
+	for index := range cells {
+		cells[index] = strings.TrimSpace(cells[index])
 	}
 	return cells, true
-}
-
-// hasUnescapedPipe сообщает, что в строке есть «|», не экранированная
-// обратным слэшем.
-func hasUnescapedPipe(text string) bool {
-	return len(splitUnescapedPipes(text)) > 1
 }
 
 // splitUnescapedPipes делит строку по «|», которая не является разделителем
@@ -915,23 +1027,6 @@ func splitUnescapedPipes(text string) []string {
 		start = index + 1
 	}
 	return append(parts, text[start:])
-}
-
-// splitCells возвращает ячейки строки таблицы: внешние «|» необязательны,
-// экранирование действует только на разделение, содержимое ячейки не
-// раскавычивается.
-func splitCells(text string) []string {
-	parts := splitUnescapedPipes(text)
-	if len(parts) > 0 && strings.TrimSpace(parts[0]) == "" {
-		parts = parts[1:]
-	}
-	if len(parts) > 0 && strings.TrimSpace(parts[len(parts)-1]) == "" {
-		parts = parts[:len(parts)-1]
-	}
-	for index := range parts {
-		parts[index] = strings.TrimSpace(parts[index])
-	}
-	return parts
 }
 
 func sameCells(cells, wanted []string) bool {
@@ -981,15 +1076,9 @@ func startsNewBlock(text string) bool {
 // за ним разделитель из шести ячеек, хотя бы одна строка данных подряд и
 // отсутствие оторванных строк.
 func checkTable(view []visibleLine) []string {
-	texts := make([]string, len(view))
-	for index, line := range view {
-		if !line.hidden {
-			texts[index] = line.text
-		}
-	}
 	var headers []int
-	for index, text := range texts {
-		if cells, ok := tableRow(text); ok && sameCells(cells, tableHeader) {
+	for index, line := range view {
+		if !line.hidden && line.table && sameCells(line.cells, tableHeader) {
 			headers = append(headers, index)
 		}
 	}
@@ -1000,7 +1089,7 @@ func checkTable(view []visibleLine) []string {
 		return []string{"Заголовок накопительной таблицы CodeRabbit повторяется: нужна одна таблица"}
 	}
 	start := headers[0]
-	if !delimiterRow(texts, start+1) {
+	if !delimiterRow(view, start+1) {
 		return []string{fmt.Sprintf(
 			"За заголовком накопительной таблицы CodeRabbit нет строки-разделителя из %d столбцов",
 			tableColumns)}
@@ -1008,60 +1097,42 @@ func checkTable(view []visibleLine) []string {
 	// Канонический заголовок обязан начинать таблицу, а не быть строкой уже
 	// открытой чужой таблицы: по GFM такая строка остаётся телом предыдущей, и
 	// отчёта из шести столбцов в документе нет.
-	if !opensTable(texts, start) {
+	if !opensTable(view, start) {
 		return []string{"Заголовок накопительной таблицы CodeRabbit не открывает собственную таблицу"}
 	}
-	var rows [][]string
-	var lines []int
-	end := len(texts)
-	for index := start + 2; index < len(texts); index++ {
+	dataStart := start + 2
+	end := len(view)
+	for index := dataStart; index < len(view); index++ {
+		line := view[index]
 		// Начало другого блока проверяется раньше разбора строки: по GFM
 		// заголовок «## Summary | Notes» закрывает таблицу, а не становится её
 		// строкой из двух ячеек, хотя черта в нём есть.
-		if startsNewBlock(texts[index]) {
+		if line.hidden || blank(line.text) || line.blockStart {
 			end = index
 			break
 		}
-		cells, ok := tableRow(texts[index])
-		if !ok {
-			// Непустая строка без «|» — по GFM это строка таблицы с одной
-			// ячейкой, а не конец таблицы: иначе «Примечание» сразу после строки
-			// данных молча добавлялось бы к отчёту. Таблицу завершает только
-			// пустая строка (скрытые строки тоже пусты) или начало другого
-			// блока.
-			if !blank(texts[index]) {
-				cells = []string{strings.TrimSpace(texts[index])}
-				ok = true
-			}
-		}
-		if !ok {
-			end = index
-			break
-		}
-		rows = append(rows, cells)
-		lines = append(lines, index)
 	}
-	if len(rows) == 0 {
+	if end == dataStart {
 		return []string{"В накопительной таблице CodeRabbit нет ни одной строки данных"}
 	}
-	problems := checkRows(rows, lines)
+	problems := checkRows(view, dataStart, end)
 	// После разрыва отклоняем вероятные продолжения таблицы: строку с внешней
 	// «|», строку из шести ячеек и строку с номером итерации. Обычная проза с
 	// одиночным разделителем продолжением таблицы не является.
-	for index := end; index < len(texts); index++ {
+	for index := end; index < len(view); index++ {
+		line := view[index]
 		// Начало другого блока продолжением таблицы не является: заголовок
 		// «## Summary | Scope | … | Owners» из шести «ячеек» — это заголовок,
 		// а не оторванная строка отчёта.
-		if startsNewBlock(texts[index]) {
+		if line.hidden || blank(line.text) || line.blockStart {
 			continue
 		}
-		cells, ok := tableRow(texts[index])
-		if !ok {
+		if !line.table {
 			continue
 		}
-		trimmed := strings.TrimSpace(texts[index])
-		if strings.HasPrefix(trimmed, "|") || len(cells) == tableColumns ||
-			iterationPrefix.MatchString(strings.TrimSpace(cells[0])) {
+		trimmed := strings.TrimSpace(line.text)
+		if strings.HasPrefix(trimmed, "|") || len(line.cells) == tableColumns ||
+			iterationPrefix.MatchString(strings.TrimSpace(line.cells[0])) {
 			problems = append(problems, fmt.Sprintf(
 				"Строка %d: строка таблицы CodeRabbit оторвана от накопительной таблицы", index+1))
 		}
@@ -1071,20 +1142,21 @@ func checkTable(view []visibleLine) []string {
 
 // opensTable сообщает, что строка открывает собственную таблицу GFM: над ней
 // нет строки таблицы, которую она продолжала бы.
-func opensTable(texts []string, index int) bool {
+func opensTable(lines []visibleLine, index int) bool {
 	// Таблица GFM заканчивается только на пустой строке или на начале другого
 	// блока. Значит достаточно найти в текущем блоке строку-разделитель выше:
 	// тогда таблица любой ширины ещё открыта, и канонический заголовок остаётся
 	// её телом, а не открывает отчёт из шести столбцов.
 	for above := index - 1; above >= 0; above-- {
-		if blank(texts[above]) || startsNewBlock(texts[above]) {
+		line := lines[above]
+		if line.hidden || blank(line.text) || line.blockStart {
 			return true
 		}
 		// Разделитель любой ширины: таблица из двух столбцов тоже не даёт
 		// открыть поверх себя отчёт из шести. Но пара «заголовок + разделитель»
 		// образует таблицу только при совпадении числа ячеек: иначе GFM
 		// оставляет их простым текстом, и заголовок отчёта свободен.
-		if anyDelimiterRow(texts[above]) && tableStartsAt(texts, above) {
+		if anyDelimiterRow(line) && tableStartsAt(lines, above) {
 			return false
 		}
 	}
@@ -1093,33 +1165,67 @@ func opensTable(texts []string, index int) bool {
 
 // tableStartsAt сообщает, что строка above — разделитель настоящей таблицы:
 // строка над ним является строкой таблицы с тем же числом ячеек.
-func tableStartsAt(texts []string, above int) bool {
+func tableStartsAt(lines []visibleLine, above int) bool {
 	if above < 1 {
 		return false
 	}
-	header, ok := tableRow(texts[above-1])
-	if !ok {
-		return false
-	}
-	delimiter, ok := tableRow(texts[above])
-	return ok && len(header) == len(delimiter)
+	return lines[above-1].table && lines[above].table &&
+		len(lines[above-1].cells) == len(lines[above].cells)
 }
 
-// markerCommitCell допускает SHA маркерного коммита в столбце «Исправление»
-// clean-строки: строчный hex от 7 до 40 символов, в обратных кавычках или без.
+// markerCommitCell допускает в ячейке clean-строки только SHA из 7–40 строчных
+// hex-символов: без кавычек или в корректной парной обёртке строчного кода.
 func markerCommitCell(cell string) bool {
-	value := strings.Trim(strings.TrimSpace(cell), "`")
+	value := strings.TrimSpace(cell)
+	if strings.HasPrefix(value, "`") {
+		var ok bool
+		value, ok = codeSpanValue(value)
+		if !ok {
+			return false
+		}
+	} else if strings.Contains(value, "`") {
+		return false
+	}
 	return abbreviatedSHA.MatchString(value)
+}
+
+func codeSpanValue(text string) (string, bool) {
+	delimiter := 0
+	for delimiter < len(text) && text[delimiter] == '`' {
+		delimiter++
+	}
+	end := len(text) - delimiter
+	if delimiter == len(text) || end < delimiter || text[end-1] == '`' {
+		return "", false
+	}
+	for index := end; index < len(text); index++ {
+		if text[index] != '`' {
+			return "", false
+		}
+	}
+	for index := delimiter; index < end; {
+		if text[index] != '`' {
+			index++
+			continue
+		}
+		start := index
+		for index < end && text[index] == '`' {
+			index++
+		}
+		if index-start == delimiter {
+			return "", false
+		}
+	}
+	return text[delimiter:end], true
 }
 
 // anyDelimiterRow сообщает, что строка — разделитель таблицы GFM любой ширины:
 // хотя бы одна ячейка из дефисов с необязательным выравниванием.
-func anyDelimiterRow(text string) bool {
-	cells, ok := tableRow(text)
-	if !ok || len(cells) == 0 {
+func anyDelimiterRow(line visibleLine) bool {
+	if !line.table || len(line.cells) == 0 {
 		return false
 	}
-	for _, cell := range cells {
+	for _, cell := range line.cells {
 		if !delimiterCell.MatchString(cell) {
 			return false
 		}
@@ -1127,14 +1233,19 @@ func anyDelimiterRow(text string) bool {
 	return true
 }
 
+func hasMatchingTableDelimiter(header, delimiter visibleLine) bool {
+	return header.table && !header.blockStart && delimiter.table && !delimiter.blockStart &&
+		len(header.cells) == len(delimiter.cells) && anyDelimiterRow(delimiter)
+}
+
 // delimiterRow проверяет строку-разделитель таблицы: шесть ячеек из дефисов с
 // необязательным выравниванием.
-func delimiterRow(texts []string, index int) bool {
-	if index < 0 || index >= len(texts) {
+func delimiterRow(lines []visibleLine, index int) bool {
+	if index < 0 || index >= len(lines) || !lines[index].table {
 		return false
 	}
-	cells, ok := tableRow(texts[index])
-	if !ok || len(cells) != tableColumns {
+	cells := lines[index].cells
+	if len(cells) != tableColumns {
 		return false
 	}
 	for _, cell := range cells {
@@ -1148,15 +1259,20 @@ func delimiterRow(texts []string, index int) bool {
 // checkRows проверяет строки данных: число столбцов, непустоту ячеек, связь с
 // итерацией и reviewed HEAD, канонические решения, последовательность номеров и
 // семантику clean.
-func checkRows(rows [][]string, lines []int) []string {
+func checkRows(view []visibleLine, start, end int) []string {
 	var problems []string
 	seen := make(map[int64]bool)
 	var current int64
 	currentSHA := ""
 	iterationRows := 0
 	cleanIteration := false
-	for index, cells := range rows {
-		lineNumber := lines[index] + 1
+	for index := start; index < end; index++ {
+		line := view[index]
+		cells := line.cells
+		if !line.table {
+			cells = []string{strings.TrimSpace(line.text)}
+		}
+		lineNumber := index + 1
 		if len(cells) != tableColumns {
 			problems = append(problems, fmt.Sprintf(
 				"Строка %d: строка таблицы CodeRabbit содержит %d столбцов вместо %d",
@@ -1499,7 +1615,8 @@ func parsePull(data []byte) (pullSnapshot, error) {
 	if snapshot.Body, snapshot.BodyPresent, err = nullableString(object, "body"); err != nil {
 		return snapshot, errors.New("некорректное тело PR из GitHub API")
 	}
-	if snapshot.State, err = nonEmptyString(object, "state"); err != nil {
+	if snapshot.State, err = nonEmptyString(object, "state"); err != nil ||
+		(snapshot.State != "open" && snapshot.State != "closed") {
 		return snapshot, errors.New("некорректное состояние PR из GitHub API")
 	}
 	snapshot.Draft, err = boolField(object, "draft")
@@ -1513,7 +1630,7 @@ func parsePull(data []byte) (pullSnapshot, error) {
 // повторы ID и заголовок Link. repositoryID — числовой идентификатор
 // репозитория назначения: он нужен для сверки канонической ссылки пагинации.
 func (c *apiClient) listComments(repository string, number, repositoryID int64) ([]issueComment, error) {
-	comments, _, err := c.readComments(repository, number, repositoryID)
+	comments, err := c.readComments(repository, number, repositoryID)
 	if err != nil {
 		return nil, err
 	}
@@ -1522,7 +1639,7 @@ func (c *apiClient) listComments(repository string, number, repositoryID int64) 
 	// Поэтому выдача перечитывается и сверяется по телу и автору; расхождение —
 	// отказ, а не молчаливый пропуск. Одна страница тоже сверяется: тело могли
 	// отредактировать между первым чтением и последующим чтением PR.
-	again, _, err := c.readComments(repository, number, repositoryID)
+	again, err := c.readComments(repository, number, repositoryID)
 	if err != nil {
 		return nil, err
 	}
@@ -1554,51 +1671,48 @@ func sameComments(first, second []issueComment) bool {
 	return true
 }
 
-// readComments читает выдачу комментариев постранично и возвращает записи
-// вместе с числом прочитанных страниц.
-func (c *apiClient) readComments(repository string, number, repositoryID int64) ([]issueComment, int, error) {
+// readComments читает выдачу комментариев постранично.
+func (c *apiClient) readComments(repository string, number, repositoryID int64) ([]issueComment, error) {
 	path := fmt.Sprintf("/repos/%s/issues/%d/comments", repository, number)
 	page := 1
-	pages := 0
 	seen := make(map[int64]bool)
 	var comments []issueComment
 	for {
 		if page > maxPages {
-			return nil, pages, errors.New("превышен предел страниц комментариев GitHub API")
+			return nil, errors.New("превышен предел страниц комментариев GitHub API")
 		}
 		response, err := c.get(fmt.Sprintf("%s?per_page=%d&page=%d", path, pageSize, page))
 		if err != nil {
-			return nil, pages, err
+			return nil, err
 		}
 		entries, err := jsonArray(response.body)
 		if err != nil || len(entries) > pageSize {
-			return nil, pages, errors.New("некорректная страница комментариев GitHub API")
+			return nil, errors.New("некорректная страница комментариев GitHub API")
 		}
-		pages++
 		for _, entry := range entries {
 			comment, err := parseComment(entry)
 			if err != nil {
-				return nil, pages, err
+				return nil, err
 			}
 			if seen[comment.ID] {
-				return nil, pages, errors.New("повторный ID комментария при пагинации")
+				return nil, errors.New("повторный ID комментария при пагинации")
 			}
 			seen[comment.ID] = true
 			comments = append(comments, comment)
 		}
 		next, err := nextPage(response.link, path, number, repositoryID, page)
 		if err != nil {
-			return nil, pages, err
+			return nil, err
 		}
 		switch {
 		case next > 0:
 			if len(entries) == 0 {
-				return nil, pages, errors.New("пустая страница содержит ссылку продолжения")
+				return nil, errors.New("пустая страница содержит ссылку продолжения")
 			}
 			page = next
 		case len(entries) < pageSize:
 			// Короткая страница без продолжения — конец выдачи.
-			return comments, pages, nil
+			return comments, nil
 		default:
 			// Ровно сто записей без Link могут быть не последней страницей:
 			// запрашиваем следующую, пока не придёт пустая.
@@ -1811,11 +1925,11 @@ func boolField(object map[string]json.RawMessage, key string) (bool, error) {
 	if !exists {
 		return false, errors.New("нет поля")
 	}
-	var value bool
-	if err := json.Unmarshal(raw, &value); err != nil {
+	var value *bool
+	if err := json.Unmarshal(raw, &value); err != nil || value == nil {
 		return false, errors.New("не булево значение")
 	}
-	return value, nil
+	return *value, nil
 }
 
 func nonEmptyString(object map[string]json.RawMessage, key string) (string, error) {

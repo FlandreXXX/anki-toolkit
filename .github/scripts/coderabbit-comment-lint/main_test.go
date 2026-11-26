@@ -625,7 +625,7 @@ func TestClosingRawTagWholeName(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := validateComment(hidden(body)); len(got) == 0 {
-				t.Fatal("неверный закрывающий тег завершил raw-блок")
+				t.Fatal("неверный закрывающий тег завершил блок необработанного HTML")
 			}
 		})
 	}
@@ -854,6 +854,81 @@ func TestCommentCLI(t *testing.T) {
 		}
 		if stdout != "" {
 			t.Fatalf("неожиданный вывод в stdout: %q", stdout)
+		}
+	})
+	t.Run("таблица сразу после пункта списка не открывается", func(t *testing.T) {
+		finding := "| 1 · `aaaaaaa` | major | `a.go` | влияние | confirmed | `bbbbbbb` |"
+		report := testMarker + "\n\n- пункт\n" + testHeader + "\n" + testDelimiter + "\n" + finding + "\n"
+		path := writeTemp(t, "comment.md", []byte(report))
+		code, stdout, stderr := runCLI("--comment-file", path)
+		if code != 1 {
+			t.Fatalf("код выхода %d, ожидался 1: stdout %q, stderr %q", code, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "Отсутствует заголовок накопительной таблицы") {
+			t.Fatalf("нет целевой диагностики: %q", stderr)
+		}
+		if stdout != "" {
+			t.Fatalf("неожиданный вывод в stdout: %q", stdout)
+		}
+	})
+	t.Run("пустая строка после пункта открывает таблицу", func(t *testing.T) {
+		finding := "| 1 · `aaaaaaa` | major | `a.go` | влияние | confirmed | `bbbbbbb` |"
+		report := testMarker + "\n\n- пункт\n\n" + testHeader + "\n" + testDelimiter + "\n" + finding + "\n"
+		path := writeTemp(t, "comment.md", []byte(report))
+		code, stdout, stderr := runCLI("--comment-file", path)
+		if code != 0 {
+			t.Fatalf("код выхода %d: stdout %q, stderr %q", code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "соответствует контракту") {
+			t.Fatalf("нет подтверждения успеха: %q", stdout)
+		}
+		if stderr != "" {
+			t.Fatalf("неожиданная диагностика: %q", stderr)
+		}
+	})
+	t.Run("таблица сразу после цитаты остаётся в абзаце", func(t *testing.T) {
+		finding := "| 1 · `aaaaaaa` | major | `a.go` | влияние | confirmed | `bbbbbbb` |"
+		report := testMarker + "\n\n> цитата\n" + testHeader + "\n" + testDelimiter + "\n" + finding + "\n"
+		path := writeTemp(t, "comment.md", []byte(report))
+		code, stdout, stderr := runCLI("--comment-file", path)
+		if code != 1 {
+			t.Fatalf("код выхода %d, ожидался 1: stdout %q, stderr %q", code, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "Отсутствует заголовок накопительной таблицы") {
+			t.Fatalf("нет целевой диагностики: %q", stderr)
+		}
+		if stdout != "" {
+			t.Fatalf("неожиданный вывод в stdout: %q", stdout)
+		}
+	})
+	t.Run("пустая строка после цитаты открывает таблицу", func(t *testing.T) {
+		finding := "| 1 · `aaaaaaa` | major | `a.go` | влияние | confirmed | `bbbbbbb` |"
+		report := testMarker + "\n\n> цитата\n\n" + testHeader + "\n" + testDelimiter + "\n" + finding + "\n"
+		path := writeTemp(t, "comment.md", []byte(report))
+		code, stdout, stderr := runCLI("--comment-file", path)
+		if code != 0 {
+			t.Fatalf("код выхода %d: stdout %q, stderr %q", code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "соответствует контракту") {
+			t.Fatalf("нет подтверждения успеха: %q", stdout)
+		}
+		if stderr != "" {
+			t.Fatalf("неожиданная диагностика: %q", stderr)
+		}
+	})
+	t.Run("одиночная черта не завершает абзац перед таблицей", func(t *testing.T) {
+		report := testMarker + "\n\nПримечание\nsome | pipe\n<span>\n" +
+			testHeader + "\n" + testDelimiter + "\n" + testCleanRow + "\n"
+		path := writeTemp(t, "comment.md", []byte(report))
+		code, stdout, stderr := runCLI("--comment-file", path)
+		if code != 0 {
+			t.Fatalf("код выхода %d: stdout %q, stderr %q", code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "соответствует контракту") {
+			t.Fatalf("нет подтверждения успеха: %q", stdout)
+		}
+		if stderr != "" {
+			t.Fatalf("неожиданная диагностика: %q", stderr)
 		}
 	})
 }
@@ -1579,6 +1654,61 @@ func TestPullValidation(t *testing.T) {
 	})
 }
 
+// TestPullStateDraftValidation проверяет state и draft через сетевой режим.
+func TestPullStateDraftValidation(t *testing.T) {
+	cases := []struct {
+		name     string
+		override map[string]any
+		missing  string
+		wantCode int
+	}{
+		{name: "состояние open, draft=true", override: map[string]any{"state": "open", "draft": true}},
+		{name: "состояние open, draft=false", override: map[string]any{"state": "open", "draft": false}},
+		{name: "состояние closed, draft=true", override: map[string]any{"state": "closed", "draft": true}},
+		{name: "состояние closed, draft=false", override: map[string]any{"state": "closed", "draft": false}},
+		{name: "неизвестное состояние", override: map[string]any{"state": "merged"}, wantCode: 2},
+		{name: "пустое состояние", override: map[string]any{"state": ""}, wantCode: 2},
+		{name: "состояние null", override: map[string]any{"state": nil}, wantCode: 2},
+		{name: "состояние не строка", override: map[string]any{"state": 1}, wantCode: 2},
+		{name: "нет состояния", missing: "state", wantCode: 2},
+		{name: "значение draft null", override: map[string]any{"draft": nil}, wantCode: 2},
+		{name: "значение draft — строка", override: map[string]any{"draft": "false"}, wantCode: 2},
+		{name: "значение draft — число", override: map[string]any{"draft": 0}, wantCode: 2},
+		{name: "отсутствует draft", missing: "draft", wantCode: 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			transport, client, _ := newTransport(t, nil)
+			transport.handle = func(request *http.Request) (*http.Response, error) {
+				if !isPullRequest(request) {
+					return transport.page(t, nil, ""), nil
+				}
+				body := pullJSON(t, c.override)
+				if c.missing != "" {
+					var pull map[string]json.RawMessage
+					if err := json.Unmarshal([]byte(body), &pull); err != nil {
+						t.Fatalf("не удалось разобрать тестовый PR: %v", err)
+					}
+					delete(pull, c.missing)
+					encoded, err := json.Marshal(pull)
+					if err != nil {
+						t.Fatalf("не удалось собрать тестовый PR: %v", err)
+					}
+					body = string(encoded)
+				}
+				return transport.trackedResponse(t, http.StatusOK, body, ""), nil
+			}
+			code, _, stderr := runEvent(t, networkEnv(), client, testEvent(t))
+			if code != c.wantCode {
+				t.Fatalf("код выхода %d, ожидался %d: %q", code, c.wantCode, stderr)
+			}
+			if c.wantCode == 2 && !strings.Contains(stderr, "Невозможно достоверно проверить") {
+				t.Fatalf("некорректное поле не вызвало отказ сетевой проверки: %q", stderr)
+			}
+		})
+	}
+}
+
 // TestPaginationNeedsRepositoryIdentity — каноническая ссылка пагинации
 // принимается только при точном совпадении числового идентификатора
 // репозитория назначения. Без достоверного идентификатора полнота чтения не
@@ -1829,7 +1959,7 @@ func TestSanitize(t *testing.T) {
 	}
 }
 
-// TestHTMLBlockInsideListItem — регрессия: «- <pre>» открывает raw-блок от
+// TestHTMLBlockInsideListItem — регрессия: «- <pre>» открывает блок необработанного HTML от
 // столбца содержимого пункта, поэтому таблица с отступом внутри него скрыта, а
 // не принимается за настоящую. GitHub рисует этот случай именно скрытым кодом.
 func TestHTMLBlockInsideListItem(t *testing.T) {
@@ -1837,7 +1967,7 @@ func TestHTMLBlockInsideListItem(t *testing.T) {
 		"\n  " + testCleanRow + "\n  </pre>\n"
 	problems := validateComment(report)
 	if len(problems) == 0 {
-		t.Fatal("таблица внутри raw-блока пункта списка принята за настоящую")
+		t.Fatal("таблица внутри блока необработанного HTML пункта списка принята за настоящую")
 	}
 	if !strings.Contains(strings.Join(problems, "\n"), "заголовок") {
 		t.Fatalf("отказ по другой причине: %q", problems)
@@ -2037,7 +2167,7 @@ func TestBlankIsASCIIOnly(t *testing.T) {
 }
 
 // TestTypeSevenInsideParagraph — регрессия: одиночный тег внутри абзаца остаётся
-// его частью и не открывает type-7 блок, поэтому следующий за ним маркер виден.
+// его частью и не открывает HTML-блок седьмого вида, поэтому следующий за ним маркер виден.
 func TestTypeSevenInsideParagraph(t *testing.T) {
 	report := "Note\n<span>\n" + testMarker + "\n\n" +
 		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
@@ -2052,8 +2182,49 @@ func TestTypeSevenInsideParagraph(t *testing.T) {
 	}
 }
 
+// TestHTMLBlockTransitionsAfterOtherBlocks — регрессия: ограждение, цитата,
+// HTML-блок и завершившийся пункт списка сбрасывают состояние абзаца, поэтому
+// следующий одиночный тег открывает скрытый HTML-блок седьмого вида.
+func TestHTMLBlockTransitionsAfterOtherBlocks(t *testing.T) {
+	table := testHeader + "\n" + testDelimiter + "\n" + testFinding
+	cases := map[string]string{
+		"ограждение": "Примечание\n~~~\nПример кода\n~~~\n<span>\n",
+		"цитата":     "> цитата\n<span>\n",
+		"HTML-блок":  "<div>\n</div>\n\n<span>\n",
+		"список":     "- пункт\n<span>\n",
+	}
+	for name, prefix := range cases {
+		t.Run(name, func(t *testing.T) {
+			report := testMarker + "\n\n" + prefix + table + "\n"
+			problems := validateComment(report)
+			if len(problems) == 0 || !strings.Contains(strings.Join(problems, "\n"), "заголовок") {
+				t.Fatalf("таблица внутри скрытого HTML-блока принята: %q", problems)
+			}
+		})
+	}
+}
+
+func TestHTMLBlockAfterGFMTable(t *testing.T) {
+	previousTable := "Примечание\n| old | table |\n| --- | --- |\n| row | row |\n"
+	finding := "| 1 · `aaaaaaa` | major | `a.go` | влияние | confirmed | `bbbbbbb` |"
+	report := testMarker + "\n\n" + previousTable + "<span>\n" +
+		testHeader + "\n" + testDelimiter + "\n" + finding + "\n"
+	problems := validateComment(report)
+	if len(problems) == 0 || !strings.Contains(strings.Join(problems, "\n"), "заголовок") {
+		t.Fatalf("таблица за HTML-блоком после настоящей таблицы принята: %q", problems)
+	}
+}
+
+func TestHTMLBlockAfterIndentedCodeInList(t *testing.T) {
+	table := "  " + testHeader + "\n  " + testDelimiter + "\n  " + testFinding
+	report := testMarker + "\n\n-\t   код\n  <span>\n" + table + "\n"
+	if got := validateComment(report); len(got) == 0 {
+		t.Fatal("таблица внутри HTML-блока после кода в пункте списка принята")
+	}
+}
+
 // TestQuotedAttributeInSingleTag — регрессия: «>» внутри кавычек не закрывает
-// одиночный тег, поэтому type-7 блок открывается и таблица в нём скрыта.
+// одиночный тег, поэтому HTML-блок седьмого вида открывается и таблица в нём скрыта.
 func TestQuotedAttributeInSingleTag(t *testing.T) {
 	report := testMarker + "\n\n<span title=\"a>b\">\n" +
 		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
@@ -2102,6 +2273,22 @@ func TestFenceAtListContentColumn(t *testing.T) {
 	}
 }
 
+// TestFenceTabAfterListMarker — регрессия: табуляция после маркера списка
+// занимает колонки до следующей позиции, кратной четырём; строка с меньшим
+// отступом начинает новое ограждение верхнего уровня и скрывает таблицу.
+func TestFenceTabAfterListMarker(t *testing.T) {
+	hidden := testMarker + "\n\n-\t~~~\n  ~~~\n" + testHeader + "\n" + testDelimiter + "\n" + testCleanRow + "\n"
+	if got := validateComment(hidden); len(got) == 0 {
+		t.Fatal("таблица внутри нового верхнеуровневого ограждения принята")
+	}
+
+	// Видимый отчёт после выхода из пункта не остаётся ошибочно скрытым.
+	visible := "-\t~~~\n" + testMarker + "\n\n" + testHeader + "\n" + testDelimiter + "\n" + testCleanRow + "\n"
+	if got := validateComment(visible); len(got) != 0 {
+		t.Fatalf("видимый отчёт после выхода из пункта отклонён: %q", got)
+	}
+}
+
 // TestMultipleLinkFields — регрессия: HTTP допускает несколько полей Link, и
 // rel="next" может прийти не первым. Чтение только первого поля обрывало
 // пагинацию на короткой странице и сообщало об отсутствии отчёта.
@@ -2131,14 +2318,14 @@ func TestMultipleLinkFields(t *testing.T) {
 }
 
 // TestParagraphEndsAtBlankLine — регрессия: пустая строка завершает абзац,
-// поэтому type-7 блок после неё открывается и маркер внутри него скрыт, хотя
+// поэтому HTML-блок седьмого вида после неё открывается и маркер внутри него скрыт, хотя
 // текст абзаца был выше.
 func TestParagraphEndsAtBlankLine(t *testing.T) {
 	report := "Note\n\n<span>\n" + testMarker + "\n\n" +
 		testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
 	problems := validateComment(report)
 	if len(problems) == 0 {
-		t.Fatal("маркер внутри type-7 блока после абзаца принят за видимый")
+		t.Fatal("маркер внутри HTML-блока седьмого вида после абзаца принят за видимый")
 	}
 	if !strings.Contains(strings.Join(problems, "\n"), "скрыт") {
 		t.Fatalf("отказ по другой причине: %q", problems)
@@ -2169,26 +2356,50 @@ func TestCleanRowRequiresMarkerCommit(t *testing.T) {
 	if got := validateComment(bad); len(got) == 0 {
 		t.Fatal("clean-строка без SHA маркерного коммита принята")
 	}
-	for _, good := range []string{"`bbbbbbb`", "bbbbbbb", "`0123456789abcdef0123456789abcdef01234567`"} {
+	for _, good := range []string{
+		"`bbbbbbb`", "bbbbbbb", "``bbbbbbb``", "```bbbbbbb```",
+		"``0123456789abcdef0123456789abcdef01234567``",
+	} {
 		row := "| 1 · `aaaaaaa` | — | — | 0 замечаний | clean | " + good + " |"
 		if got := validateComment(reportOf(row)); len(got) != 0 {
 			t.Fatalf("clean-строка с SHA %q отклонена: %q", good, got)
 		}
 	}
+	for _, bad := range []string{
+		"`bbbbbbb", "bbbbbbb`", "`bbbbbbb``", "` bbbbbbb `", "`bbbbbbb` extra", "`",
+		"``bbbbbbb`", "```bbbbbbb``",
+	} {
+		row := "| 1 · `aaaaaaa` | — | — | 0 замечаний | clean | " + bad + " |"
+		if got := validateComment(reportOf(row)); len(got) == 0 {
+			t.Errorf("повреждённое представление SHA %q принято", bad)
+		}
+	}
 }
 
-// TestPullStateCompared — регрессия: смена состояния PR при неизменных SHA,
-// авторе и теле обнаруживается сравнением снимков.
-func TestPullStateCompared(t *testing.T) {
-	first := pullSnapshot{Number: 1, AuthorID: 1, HeadSHA: testSHA, State: "open", Draft: true}
-	changed := first
-	changed.Draft = false
-	if changed == first {
-		t.Fatal("снимки с разным Draft сравнились равными")
-	}
-	closed := first
-	closed.State = "closed"
-	if closed == first {
-		t.Fatal("снимки с разным State сравнились равными")
+// TestPullStateChangesDuringCheck проверяет через рабочую цепочку, что смена
+// state или draft между двумя запросами PR приводит к отказу.
+func TestPullStateChangesDuringCheck(t *testing.T) {
+	for name, override := range map[string]map[string]any{
+		"изменилось состояние": {"state": "closed"},
+		"изменился draft":      {"draft": false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pulls := 0
+			transport, client, _ := newTransport(t, nil)
+			transport.handle = func(request *http.Request) (*http.Response, error) {
+				if isPullRequest(request) {
+					pulls++
+					if pulls == 1 {
+						return transport.pull(t, nil), nil
+					}
+					return transport.pull(t, override), nil
+				}
+				return transport.page(t, nil, ""), nil
+			}
+			code, _, stderr := runEvent(t, networkEnv(), client, testEvent(t))
+			if code != 2 || !strings.Contains(stderr, "PR изменился во время проверки") {
+				t.Fatalf("изменение PR не отклонено через сетевой режим: код %d, %q", code, stderr)
+			}
+		})
 	}
 }
