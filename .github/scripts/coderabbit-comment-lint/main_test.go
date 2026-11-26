@@ -1819,3 +1819,53 @@ func TestSanitize(t *testing.T) {
 		t.Fatalf("управляющие символы не заменены пробелом: %q", got)
 	}
 }
+
+// TestHTMLBlockInsideListItem — регрессия: «- <pre>» открывает raw-блок от
+// столбца содержимого пункта, поэтому таблица с отступом внутри него скрыта, а
+// не принимается за настоящую. GitHub рисует этот случай именно скрытым кодом.
+func TestHTMLBlockInsideListItem(t *testing.T) {
+	report := testMarker + "\n\n- <pre>\n  " + testHeader + "\n  " + testDelimiter +
+		"\n  " + testCleanRow + "\n  </pre>\n"
+	problems := validateComment(report)
+	if len(problems) == 0 {
+		t.Fatal("таблица внутри raw-блока пункта списка принята за настоящую")
+	}
+	if !strings.Contains(strings.Join(problems, "\n"), "заголовок") {
+		t.Fatalf("отказ по другой причине: %q", problems)
+	}
+	// Таблица верхнего уровня после закрытия пункта по-прежнему принимается.
+	allowed := "- пример\n  продолжение\n\n" + reportOf(testFinding)
+	if got := validateComment(allowed); len(got) != 0 {
+		t.Fatalf("таблица после пункта списка отклонена: %q", got)
+	}
+}
+
+// TestHeadingAfterTableEndsIt — регрессия: по GFM заголовок «## Summary | Notes»
+// сразу после строки данных закрывает таблицу, а не становится её строкой из
+// двух ячеек, хотя незаэкранированная черта в нём есть.
+func TestHeadingAfterTableEndsIt(t *testing.T) {
+	if got := validateComment(reportOf(testFinding) + "## Summary | Notes\n"); len(got) != 0 {
+		t.Fatalf("заголовок после таблицы отклонён: %q", got)
+	}
+	// Проза без открывающего блока по-прежнему остаётся одноклеточной строкой.
+	problems := validateComment(reportOf(testFinding) + "Примечание\n")
+	if len(problems) == 0 || !strings.Contains(strings.Join(problems, "\n"), "столбц") {
+		t.Fatalf("одноклеточная строка после данных не отклонена: %q", problems)
+	}
+}
+
+// TestInlineCommentEndsWithBlock — регрессия: «<!--», открытый в середине
+// абзаца, не переходит через пустую строку и не скрывает следующий за абзацем
+// отчёт; GitHub рисует такой литерал обычным текстом.
+func TestInlineCommentEndsWithBlock(t *testing.T) {
+	report := "Вступление заканчивается литеральным <!--\n\n" +
+		testMarker + "\n\n" + testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	if got := validateComment(report); len(got) != 0 {
+		t.Fatalf("литеральный «<!--» в абзаце скрыл отчёт: %q", got)
+	}
+	// Настоящий многострочный комментарий по-прежнему скрывает маркер.
+	hidden := "<!--\n" + testMarker + "\n-->\n" + testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
+	if got := validateComment(hidden); len(got) == 0 {
+		t.Fatal("настоящий комментарий не скрыл маркер")
+	}
+}

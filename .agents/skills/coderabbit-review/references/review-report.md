@@ -84,6 +84,9 @@ push, проверка удалённого SHA, создание и измен�
 
 ## 4. История
 
+- Таблица **инкрементальная**: новые итерации дописываются к уже опубликованным, а
+  не начинают нумерацию заново. Если в отчёте уже пять итераций и пользователь
+  просит ещё пять, это итерации 6–10, а не повтор 1–5.
 - История дополняется: прежние строки не удаляются и не переписываются ради
   красивого итога.
 - Исправление ошибки в исторической строке — только явно согласованное действие.
@@ -160,24 +163,25 @@ POSIX-подобной командной оболочки (`sh`, `bash`) с у�
 
 ```bash
 # $repo — ожидаемый репозиторий назначения (owner/name), $number — номер PR.
+# Хост закреплён: gh не должен брать токен GitHub Enterprise из своего умолчания.
 snapshot_dir=$(mktemp -d "${TMPDIR:-/tmp}/coderabbit-snapshot.XXXXXX") || exit 1
 trap 'rm -rf "$snapshot_dir"' EXIT HUP INT TERM
 
 # Репозиторий назначения берётся из ответа API о том же PR, а не из
 # head-репозитория: у PR из форка они разные.
-destination=$(gh api "repos/$repo/pulls/$number" --jq '.base.repo.full_name') || exit 1
+destination=$(gh api --hostname github.com "repos/$repo/pulls/$number" --jq '.base.repo.full_name') || exit 1
 if [ "$destination" != "$repo" ]; then
   echo "Репозиторий назначения PR ($destination) не совпадает с ожидаемым ($repo)" >&2
   exit 2
 fi
 
 # Один и тот же объект PR: репозиторий назначения, номер и полный head SHA.
-gh api "repos/$repo/pulls/$number" --jq '{
+gh api --hostname github.com "repos/$repo/pulls/$number" --jq '{
     repository: {full_name: .base.repo.full_name},
     pull_request: {number: .number, head: {sha: .head.sha}}
   }' > "$snapshot_dir/event.json" || exit 1
 
-GITHUB_REPOSITORY="$destination" GITHUB_TOKEN="$(gh auth token)" \
+GITHUB_REPOSITORY="$destination" GITHUB_TOKEN="$(gh auth token --hostname github.com)" \
   go run .github/scripts/coderabbit-comment-lint/main.go \
   --event-file "$snapshot_dir/event.json"
 ```

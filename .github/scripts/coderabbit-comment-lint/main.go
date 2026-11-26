@@ -420,10 +420,17 @@ func (v *viewer) line(line string) visibleLine {
 		return visibleLine{hidden: true}
 	}
 	if v.comment {
-		if strings.Contains(line, "-->") {
-			v.comment = false
+		if !blank(line) {
+			if strings.Contains(line, "-->") {
+				v.comment = false
+			}
+			return visibleLine{hidden: true}
 		}
-		return visibleLine{hidden: true}
+		// Строчный комментарий не переходит через пустую строку: абзац
+		// закончился, следующий блок разбирается заново. Незакрытый «<!--»
+		// в конце абзаца — литеральный текст, а не начало скрытого блока
+		// (GFM скрывает только комментарий, закрытый в том же блоке).
+		v.comment = false
 	}
 	if blank(line) {
 		// Пустая строка может продолжать пункт списка, поэтому listCol
@@ -453,7 +460,7 @@ func (v *viewer) line(line string) visibleLine {
 	if quoted(line) {
 		return visibleLine{hidden: true}
 	}
-	if kind := htmlBlockStart(line); kind != htmlNone {
+	if kind := htmlBlockStartIn(line, v.listCol); kind != htmlNone {
 		if !closesHTMLBlock(line, kind) {
 			v.html = kind
 			return visibleLine{hidden: true}
@@ -486,14 +493,36 @@ var blockTags = []string{
 	"track", "ul",
 }
 
-// htmlBlockStart распознаёт строку, открывающую HTML-блок GFM; ноль — строка
-// HTML-блок не открывает. Учитывается не более трёх пробелов отступа.
+// htmlBlockStart распознаёт строку, открывающую HTML-блок GFM верхнего уровня;
+// htmlNone — строка HTML-блок не открывает. Учитывается не более трёх пробелов
+// отступа.
 func htmlBlockStart(line string) htmlKind {
 	pad := leadingSpaces(line)
 	if pad > 3 {
 		return htmlNone
 	}
-	rest := line[pad:]
+	return htmlBlockStartText(line[pad:])
+}
+
+// htmlBlockStartIn распознаёт открытие HTML-блока внутри текущего контейнера.
+// В пункте списка содержимое начинается сразу за маркером, поэтому «- <pre>»
+// открывает raw-блок, который GitHub рисует как скрытый код; пропуск этого
+// случая принимал спрятанную в нём таблицу за настоящую. Вне пункта блок
+// начинается с отступом не более трёх пробелов от столбца содержимого listCol.
+func htmlBlockStartIn(line string, listCol int) htmlKind {
+	if col, ok := listItemContent(line); ok {
+		return htmlBlockStartText(line[col:])
+	}
+	pad := leadingSpaces(line)
+	if pad < listCol || pad > listCol+3 {
+		return htmlNone
+	}
+	return htmlBlockStartText(line[pad:])
+}
+
+// htmlBlockStartText распознаёт HTML-блок в тексте, уже освобождённом от
+// отступа контейнера.
+func htmlBlockStartText(rest string) htmlKind {
 	lower := strings.ToLower(rest)
 	for tag := range rawTextTags {
 		if hasTagPrefix(lower, "<"+tag, false) {
@@ -926,6 +955,13 @@ func checkTable(view []visibleLine) []string {
 	var lines []int
 	end := len(texts)
 	for index := start + 2; index < len(texts); index++ {
+		// Начало другого блока проверяется раньше разбора строки: по GFM
+		// заголовок «## Summary | Notes» закрывает таблицу, а не становится её
+		// строкой из двух ячеек, хотя черта в нём есть.
+		if startsNewBlock(texts[index]) {
+			end = index
+			break
+		}
 		cells, ok := tableRow(texts[index])
 		if !ok {
 			// Непустая строка без «|» — по GFM это строка таблицы с одной
@@ -933,7 +969,7 @@ func checkTable(view []visibleLine) []string {
 			// данных молча добавлялось бы к отчёту. Таблицу завершает только
 			// пустая строка (скрытые строки тоже пусты) или начало другого
 			// блока.
-			if !blank(texts[index]) && !startsNewBlock(texts[index]) {
+			if !blank(texts[index]) {
 				cells = []string{strings.TrimSpace(texts[index])}
 				ok = true
 			}
