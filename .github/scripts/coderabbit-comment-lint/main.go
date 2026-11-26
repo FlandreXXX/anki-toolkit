@@ -384,6 +384,10 @@ type viewer struct {
 	fence   *fence
 	comment bool
 	html    htmlKind
+	// htmlCol — столбец содержимого пункта списка, внутри которого открыт
+	// HTML-блок; ноль — блок вне списка. Пункт заканчивается на строке с
+	// меньшим отступом, и тогда блок тоже заканчивается.
+	htmlCol int
 	listCol int
 }
 
@@ -414,13 +418,32 @@ func (v *viewer) line(line string) visibleLine {
 		return visibleLine{hidden: true}
 	}
 	if v.html != htmlNone {
+		// HTML-блок, открытый внутри пункта списка, заканчивается вместе с
+		// пунктом: строка меньшего отступа уже вне контейнера и разбирается
+		// заново. Без этого маркер после «- <div>note</div>» считался бы
+		// скрытым, хотя GFM рисует его отдельным блоком.
+		if v.htmlCol > 0 && !blank(line) && indentWidth(line) < v.htmlCol {
+			v.html = htmlNone
+			v.htmlCol = 0
+			return v.line(line)
+		}
 		if closesHTMLBlock(line, v.html) {
 			v.html = htmlNone
+			v.htmlCol = 0
 		}
 		return visibleLine{hidden: true}
 	}
 	if v.comment {
 		if !blank(line) {
+			// Строчный комментарий живёт внутри своего абзаца. Ограждение,
+			// заголовок, цитата, пункт списка или HTML-блок прерывают абзац и
+			// начинают новый блок, поэтому комментарий на них не
+			// распространяется: иначе «Note <!--» съедал бы открывающее «~~~»
+			// и таблица внутри кода принималась бы за настоящую.
+			if startsNewBlock(line) {
+				v.comment = false
+				return v.line(line)
+			}
 			if strings.Contains(line, "-->") {
 				v.comment = false
 			}
@@ -463,6 +486,7 @@ func (v *viewer) line(line string) visibleLine {
 	if kind := htmlBlockStartIn(line, v.listCol); kind != htmlNone {
 		if !closesHTMLBlock(line, kind) {
 			v.html = kind
+			v.htmlCol = v.listCol
 			return visibleLine{hidden: true}
 		}
 		// Блок из одной строки. Отдельный HTML-комментарий — допустимое место
@@ -489,8 +513,8 @@ var blockTags = []string{
 	"frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header",
 	"hr", "html", "iframe", "legend", "li", "link", "main", "menu", "menuitem",
 	"nav", "noframes", "ol", "optgroup", "option", "p", "param", "section",
-	"summary", "table", "tbody", "td", "tfoot", "th", "thead", "title", "tr",
-	"track", "ul",
+	"source", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "title",
+	"tr", "track", "ul",
 }
 
 // htmlBlockStart распознаёт строку, открывающую HTML-блок GFM верхнего уровня;
@@ -841,24 +865,24 @@ func hasUnescapedPipe(text string) bool {
 	return len(splitUnescapedPipes(text)) > 1
 }
 
-// splitUnescapedPipes делит строку только по неэкранированной «|» с учётом
-// чётности обратных слэшей: «\|» — литеральная черта.
+// splitUnescapedPipes делит строку по «|», которая не является разделителем
+// ячейки. По фактическому поведению GFM (сверено с рендером GitHub для одного,
+// двух и трёх обратных слэшей) черта литеральна, если непосредственно перед ней
+// стоит обратный слэш; чётность серии слэшей роли не играет. Правило чётности
+// давало лишнее разделение: «a\\|b» в отчёте считалось бы двумя ячейками, хотя
+// GitHub рисует одну.
 func splitUnescapedPipes(text string) []string {
 	var parts []string
 	start := 0
-	slashes := 0
 	for index := 0; index < len(text); index++ {
-		switch text[index] {
-		case '\\':
-			slashes++
+		if text[index] != '|' {
 			continue
-		case '|':
-			if slashes%2 == 0 {
-				parts = append(parts, text[start:index])
-				start = index + 1
-			}
 		}
-		slashes = 0
+		if index > 0 && text[index-1] == '\\' {
+			continue
+		}
+		parts = append(parts, text[start:index])
+		start = index + 1
 	}
 	return append(parts, text[start:])
 }
@@ -951,6 +975,12 @@ func checkTable(view []visibleLine) []string {
 			"За заголовком накопительной таблицы CodeRabbit нет строки-разделителя из %d столбцов",
 			tableColumns)}
 	}
+	// Канонический заголовок обязан начинать таблицу, а не быть строкой уже
+	// открытой чужой таблицы: по GFM такая строка остаётся телом предыдущей, и
+	// отчёта из шести столбцов в документе нет.
+	if !opensTable(texts, start) {
+		return []string{"Заголовок накопительной таблицы CodeRabbit не открывает собственную таблицу"}
+	}
 	var rows [][]string
 	var lines []int
 	end := len(texts)
@@ -989,6 +1019,12 @@ func checkTable(view []visibleLine) []string {
 	// «|», строку из шести ячеек и строку с номером итерации. Обычная проза с
 	// одиночным разделителем продолжением таблицы не является.
 	for index := end; index < len(texts); index++ {
+		// Начало другого блока продолжением таблицы не является: заголовок
+		// «## Summary | Scope | … | Owners» из шести «ячеек» — это заголовок,
+		// а не оторванная строка отчёта.
+		if startsNewBlock(texts[index]) {
+			continue
+		}
 		cells, ok := tableRow(texts[index])
 		if !ok {
 			continue
@@ -1001,6 +1037,20 @@ func checkTable(view []visibleLine) []string {
 		}
 	}
 	return problems
+}
+
+// opensTable сообщает, что строка открывает собственную таблицу GFM: над ней
+// нет строки таблицы, которую она продолжала бы.
+func opensTable(texts []string, index int) bool {
+	if index == 0 {
+		return true
+	}
+	previous := texts[index-1]
+	if blank(previous) || startsNewBlock(previous) {
+		return true
+	}
+	// Разделитель предыдущей таблицы: «|---|» и подобное.
+	return delimiterRow(texts, index-1)
 }
 
 // delimiterRow проверяет строку-разделитель таблицы: шесть ячеек из дефисов с
@@ -1367,46 +1417,91 @@ func parsePull(data []byte) (pullSnapshot, error) {
 // повторы ID и заголовок Link. repositoryID — числовой идентификатор
 // репозитория назначения: он нужен для сверки канонической ссылки пагинации.
 func (c *apiClient) listComments(repository string, number, repositoryID int64) ([]issueComment, error) {
+	comments, pages, err := c.readComments(repository, number, repositoryID)
+	if err != nil {
+		return nil, err
+	}
+	if pages < 2 {
+		// Выдача поместилась в одну страницу: сдвига между страницами быть не
+		// может, повторное чтение ничего не докажет.
+		return comments, nil
+	}
+	// Постраничное чтение не является снимком: удаление комментария между
+	// страницами сдвигает выдачу, и запись может быть пропущена без повтора ID.
+	// Поэтому многостраничная выдача перечитывается целиком и сверяется по
+	// набору ID; расхождение — отказ, а не молчаливый пропуск.
+	again, _, err := c.readComments(repository, number, repositoryID)
+	if err != nil {
+		return nil, err
+	}
+	if !sameCommentIDs(comments, again) {
+		return nil, errors.New("выдача комментариев изменилась во время постраничного чтения")
+	}
+	return comments, nil
+}
+
+// sameCommentIDs сравнивает две выдачи по набору идентификаторов.
+func sameCommentIDs(first, second []issueComment) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	firstIDs := make(map[int64]bool, len(first))
+	for _, comment := range first {
+		firstIDs[comment.ID] = true
+	}
+	for _, comment := range second {
+		if !firstIDs[comment.ID] {
+			return false
+		}
+	}
+	return true
+}
+
+// readComments читает выдачу комментариев постранично и возвращает записи
+// вместе с числом прочитанных страниц.
+func (c *apiClient) readComments(repository string, number, repositoryID int64) ([]issueComment, int, error) {
 	path := fmt.Sprintf("/repos/%s/issues/%d/comments", repository, number)
 	page := 1
+	pages := 0
 	seen := make(map[int64]bool)
 	var comments []issueComment
 	for {
 		if page > maxPages {
-			return nil, errors.New("превышен предел страниц комментариев GitHub API")
+			return nil, pages, errors.New("превышен предел страниц комментариев GitHub API")
 		}
 		response, err := c.get(fmt.Sprintf("%s?per_page=%d&page=%d", path, pageSize, page))
 		if err != nil {
-			return nil, err
+			return nil, pages, err
 		}
 		entries, err := jsonArray(response.body)
 		if err != nil || len(entries) > pageSize {
-			return nil, errors.New("некорректная страница комментариев GitHub API")
+			return nil, pages, errors.New("некорректная страница комментариев GitHub API")
 		}
+		pages++
 		for _, entry := range entries {
 			comment, err := parseComment(entry)
 			if err != nil {
-				return nil, err
+				return nil, pages, err
 			}
 			if seen[comment.ID] {
-				return nil, errors.New("повторный ID комментария при пагинации")
+				return nil, pages, errors.New("повторный ID комментария при пагинации")
 			}
 			seen[comment.ID] = true
 			comments = append(comments, comment)
 		}
 		next, err := nextPage(response.link, path, number, repositoryID, page)
 		if err != nil {
-			return nil, err
+			return nil, pages, err
 		}
 		switch {
 		case next > 0:
 			if len(entries) == 0 {
-				return nil, errors.New("пустая страница содержит ссылку продолжения")
+				return nil, pages, errors.New("пустая страница содержит ссылку продолжения")
 			}
 			page = next
 		case len(entries) < pageSize:
 			// Короткая страница без продолжения — конец выдачи.
-			return comments, nil
+			return comments, pages, nil
 		default:
 			// Ровно сто записей без Link могут быть не последней страницей:
 			// запрашиваем следующую, пока не придёт пустая.

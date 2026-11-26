@@ -536,7 +536,11 @@ func TestEscapedPipe(t *testing.T) {
 		want int
 	}{
 		{name: "экранированная черта внутри текста", row: "| 1 · `aaaaaaa` | minor | `a.go` | a\\|b | confirmed | fix |", want: 6},
-		{name: "две обратные черты перед чертой", row: "| 1 · `aaaaaaa` | minor | `a.go` | a\\\\|b | confirmed | fix |", want: 7},
+		// Две обратные черты перед чертой: по фактическому GFM (сверено с
+		// рендером GitHub) черта остаётся литеральной, ячеек по-прежнему шесть.
+		{name: "две обратные черты перед чертой", row: "| 1 · `aaaaaaa` | minor | `a.go` | a\\\\|b | confirmed | fix |", want: 6},
+		{name: "три обратные черты перед чертой", row: "| 1 · `aaaaaaa` | minor | `a.go` | a\\\\\\|b | confirmed | fix |", want: 6},
+		{name: "неэкранированная черта в тексте", row: "| 1 · `aaaaaaa` | minor | `a.go` | a | b | confirmed | fix |", want: 7},
 		{name: "экранированная черта в строчном коде", row: "| 1 · `aaaaaaa` | minor | `a\\|b.go` | эффект | confirmed | fix |", want: 6},
 	}
 	for _, c := range cases {
@@ -1363,7 +1367,7 @@ func TestPagination(t *testing.T) {
 				return ""
 			},
 			wantCode:  0,
-			wantCalls: 4,
+			wantCalls: 6, // два полных чтения по две страницы плюс PR до и после
 		},
 		{
 			name: "сто записей без Link",
@@ -1372,7 +1376,7 @@ func TestPagination(t *testing.T) {
 			},
 			links:     func(int) string { return "" },
 			wantCode:  0,
-			wantCalls: 4,
+			wantCalls: 6,
 		},
 		{
 			name: "дубли на разных страницах",
@@ -1412,7 +1416,7 @@ func TestPagination(t *testing.T) {
 					testBaseRepoID, testPRNumber, page+1)
 			},
 			wantCode:  0,
-			wantCalls: 4,
+			wantCalls: 6,
 		},
 	}
 	for _, c := range cases {
@@ -1867,5 +1871,51 @@ func TestInlineCommentEndsWithBlock(t *testing.T) {
 	hidden := "<!--\n" + testMarker + "\n-->\n" + testHeader + "\n" + testDelimiter + "\n" + testFinding + "\n"
 	if got := validateComment(hidden); len(got) == 0 {
 		t.Fatal("настоящий комментарий не скрыл маркер")
+	}
+}
+
+// TestPaginationShiftedBetweenReads — регрессия: удаление комментария между
+// страницами сдвигает выдачу и может пропустить запись без повтора ID. Сверка
+// двух полных чтений обязана такой сдвиг обнаружить, а не объявить полный
+// успешный скан.
+func TestPaginationShiftedBetweenReads(t *testing.T) {
+	first := make([]map[string]any, 0, 100)
+	for index := 1; index <= 100; index++ {
+		first = append(first, ordinaryComment(int64(1000+index), fmt.Sprintf("запись %d", index)))
+	}
+	// Во втором чтении первая запись исчезла: страницы сдвинулись, и набор ID
+	// уже другой.
+	second := first[1:]
+	secondPage := []map[string]any{markedComment(2000, 1, validReport())}
+	reads := 0
+	transport, client, _ := newTransport(t, nil)
+	transport.handle = func(request *http.Request) (*http.Response, error) {
+		if isPullRequest(request) {
+			return transport.pull(t, nil), nil
+		}
+		page := pageNumber(request)
+		switch page {
+		case 1:
+			current := first
+			if reads > 0 {
+				current = second
+			}
+			return transport.page(t, current, pageLink(2)), nil
+		case 2:
+			if reads == 0 {
+				reads++
+				return transport.page(t, secondPage, ""), nil
+			}
+			// Второе чтение: продолжение после сдвига.
+			return transport.page(t, secondPage, ""), nil
+		}
+		return transport.page(t, nil, ""), nil
+	}
+	code, _, stderr := runEvent(t, networkEnv(), client, testEvent(t))
+	if code == 0 {
+		t.Fatalf("сдвиг выдачи между страницами принят за полный скан: %q", stderr)
+	}
+	if !strings.Contains(stderr, "изменилась") {
+		t.Fatalf("отказ по другой причине: %q", stderr)
 	}
 }
