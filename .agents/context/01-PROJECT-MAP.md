@@ -97,7 +97,7 @@ Go-модуля в репозитории нет: ни `go.mod`, ни `go.sum`, 
   [`scope-and-escalation.md`](../skills/systematic-debugging/references/scope-and-escalation.md) и
   [`go-diagnostics.md`](../skills/systematic-debugging/references/go-diagnostics.md).
 - `git-workflow` ([`SKILL.md`](../skills/git-workflow/SKILL.md)) — общая процедура
-  публикации: ветка, индекс, commit, push, проверка точного удалённого SHA,
+  публикации: ветка, индекс, коммит, push, проверка точного удалённого SHA,
   создание и повторное чтение PR, Draft/Ready, конфликты с base, отдельно
   разрешённый merge. Детали — [`publication.md`](../skills/git-workflow/references/publication.md),
   [`pr-body.md`](../skills/git-workflow/references/pr-body.md),
@@ -136,8 +136,9 @@ Go-модуля в репозитории нет: ни `go.mod`, ни `go.sum`, 
 
 ## Как находить место изменения
 
-1. Определи область: постоянные ограничения, тестирование, публикация, цикл
-   CodeRabbit, формат отчёта, утилита проверки или CI.
+1. Определи область: постоянные ограничения, систематическая диагностика и
+   эскалация, тестирование, публикация, цикл CodeRabbit, формат отчёта, утилита
+   проверки или CI.
 2. Открой владельца из таблицы в [`INDEX.md`](INDEX.md), а не пиши процедуру
    заново.
 3. Для Go-тестов применяй `testing` вместе с `go-best-practices`. Для
