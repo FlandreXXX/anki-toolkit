@@ -20,11 +20,11 @@ func (r Resolver) defaultPath(kind string) (Path, error) {
 	if !absolute(base) {
 		home, _ := r.LookupEnv("HOME")
 		if !absolute(home) {
-			return Path{}, &Error{Source: "default", Message: "Не удалось определить пользовательский каталог из " + env + " или HOME."}
+			return Path{}, &Error{Source: SourceDefault, Message: "Не удалось определить пользовательский каталог из " + env + " или HOME."}
 		}
 		base = filepath.Join(home, fallback)
 	}
-	return Path{Value: filepath.Join(base, "anki-toolkit"), Source: "default"}, nil
+	return Path{Value: filepath.Join(base, "anki-toolkit"), Source: SourceDefault}, nil
 }
 
 func validAbsolute(string) bool { return true }

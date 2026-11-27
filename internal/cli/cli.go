@@ -196,7 +196,10 @@ func render(machine bool, out app.Response, stdout, stderr io.Writer) error {
 }
 
 func describe(label string, report app.PathReport) string {
-	sources := map[string]string{"default": "по умолчанию", "file": "файл", "environment": "окружение", "cli": "CLI"}
+	sources := map[string]string{
+		config.SourceDefault: "по умолчанию", config.SourceFile: "файл",
+		config.SourceEnvironment: "окружение", config.SourceCLI: "CLI",
+	}
 	statuses := map[app.PathStatus]string{
 		app.Present: "существует", app.Missing: "отсутствует",
 		app.WrongType: "объект другого типа", app.Unavailable: "проверка недоступна",

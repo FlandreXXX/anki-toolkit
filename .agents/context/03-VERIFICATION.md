@@ -16,7 +16,7 @@
 
 | Команда | Что проверяет |
 | --- | --- |
-| `go version`, `go env GOTOOLCHAIN GOROOT GOVERSION` | Фактический toolchain из рабочей копии. |
+| `go version`, `go env GOTOOLCHAIN GOROOT GOVERSION` | Фактический инструментарий Go в рабочей копии. |
 | `gofmt -l cmd internal` | Форматирование исходников и тестов продукта. |
 | `go vet ./...` | Статическая проверка продуктовых пакетов. |
 | `go test -count=1 ./...` | Приоритеты и строгий разбор конфигурации, платформенные пути, прикладные операции, CLI и запуск собранного бинарника. Процесс получает синтетическое окружение и временные каталоги, снимки сравниваются до и после вызовов. |
@@ -35,6 +35,16 @@
 
 Кросс-сборки из Linux проверяют компиляцию целевых бинарников отдельно от их запуска.
 `$tmp` — заранее созданный временный каталог.
+
+Тестовые файлы с платформенными ограничениями выполняются только на своей ОС:
+`go test ./...` на Linux не запускает `config_windows_test.go` и
+`read_failure_windows_test.go`. Кросс-проверка из Linux подтверждает их компиляцию,
+но не выполнение, поэтому нативный прогон на Windows остаётся отдельной проверкой.
+
+```bash
+GOOS=windows GOARCH=amd64 go test -c -o /dev/null ./cmd/anki-toolkit/
+GOOS=windows GOARCH=amd64 go test -c -o /dev/null ./internal/config/
+```
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$tmp/anki-toolkit-linux-amd64" ./cmd/anki-toolkit

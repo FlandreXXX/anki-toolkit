@@ -75,14 +75,21 @@ func TestFileValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Независимые от реализации литералы: контракт 64 КиБ = 65 536 байт.
+	const (
+		schemaOnly = `{"schema_version":1}`
+		limit      = 65536
+	)
+	pad := func(n int) string { return schemaOnly + strings.Repeat(" ", n-len(schemaOnly)) }
 	for _, test := range []struct {
 		name, raw string
 		valid     bool
 	}{
-		{"только схема", `{"schema_version":1}`, true},
+		{"только схема", schemaOnly, true},
 		{"Unicode и пробелы", `{"schema_version":1,"data_dir":` + string(validPath) + `}`, true},
-		{"точная граница", `{"schema_version":1}` + strings.Repeat(" ", maxFileSize-len(`{"schema_version":1}`)), true},
-		{"размер", `{"schema_version":1}` + strings.Repeat(" ", maxFileSize), false},
+		{"граница минус один", pad(limit - 1), true},
+		{"точная граница", pad(limit), true},
+		{"граница плюс один", pad(limit + 1), false},
 		{"синтаксис", `{"schema_version":`, false},
 		{"неизвестный ключ", `{"schema_version":1,"PRIVATE_MARKER":true}`, false},
 		{"регистр ключа", `{"SCHEMA_VERSION":1}`, false},

@@ -20,6 +20,14 @@ const (
 	maxFileSize  = 64 << 10
 )
 
+// Канонические идентификаторы источников значения в машинном протоколе.
+const (
+	SourceDefault     = "default"
+	SourceFile        = "file"
+	SourceEnvironment = "environment"
+	SourceCLI         = "cli"
+)
+
 // Overrides различает отсутствующие флаги и явно переданные пустые значения.
 type Overrides struct {
 	ConfigFile *string
@@ -81,7 +89,7 @@ func (r Resolver) Resolve(ctx context.Context, overrides Overrides) (Settings, e
 		}
 		data.Value = filepath.Clean(data.Value)
 	case dataFromFile != "":
-		data = Path{Value: filepath.Clean(dataFromFile), Source: "file"}
+		data = Path{Value: filepath.Clean(dataFromFile), Source: SourceFile}
 	default:
 		data, err = r.defaultPath("data")
 		if err != nil {
@@ -101,10 +109,10 @@ func (r Resolver) Resolve(ctx context.Context, overrides Overrides) (Settings, e
 
 func (r Resolver) override(value *string, env string) (Path, bool) {
 	if value != nil {
-		return Path{Value: *value, Source: "cli"}, true
+		return Path{Value: *value, Source: SourceCLI}, true
 	}
 	if v, ok := r.LookupEnv(env); ok {
-		return Path{Value: v, Source: "environment"}, true
+		return Path{Value: v, Source: SourceEnvironment}, true
 	}
 	return Path{}, false
 }
@@ -147,28 +155,42 @@ func absolute(path string) bool {
 }
 
 func readConfig(p Path) (string, error) {
-	info, err := os.Stat(p.Value)
-	switch {
-	case errors.Is(err, fs.ErrNotExist) && p.Source == "default":
-		if _, linkErr := os.Lstat(p.Value); errors.Is(linkErr, fs.ErrNotExist) {
-			return "", nil
-		} else if linkErr != nil {
-			return "", configIO(p, linkErr)
+	file, err := openConfig(p.Value)
+	if err != nil {
+		switch {
+		case errors.Is(err, fs.ErrNotExist) && p.Source == SourceDefault:
+			// Отсутствие стандартного файла допустимо. Отсутствие по Lstat
+			// отличает его от оборванной символической ссылки.
+			if _, linkErr := os.Lstat(p.Value); errors.Is(linkErr, fs.ErrNotExist) {
+				return "", nil
+			} else if linkErr != nil {
+				return "", configIO(p, linkErr)
+			}
+			return "", configIO(p, err)
+		case errors.Is(err, fs.ErrNotExist):
+			return "", &Error{Source: p.Source, Message: "Указанный файл конфигурации отсутствует.", cause: err}
+		default:
+			return "", configIO(p, err)
 		}
-		return "", configIO(p, err)
-	case errors.Is(err, fs.ErrNotExist):
-		return "", &Error{Source: p.Source, Message: "Указанный файл конфигурации отсутствует.", cause: err}
-	case err != nil:
-		return "", configIO(p, err)
-	case !info.Mode().IsRegular():
-		return "", &Error{Source: p.Source, Message: "Конфигурация должна быть обычным файлом."}
 	}
+	defer file.Close()
+	return consumeConfig(file, p)
+}
 
-	file, err := os.Open(p.Value)
+// consumeConfig проверяет и читает уже открытый объект по его дескриптору.
+// Тип определяется по метаданным открытого объекта, поэтому замена имени между
+// открытием и проверкой не может подменить читаемые данные.
+//
+// ponytail: содержимое файла после открытия не защищено от чужой записи; снимок
+// на уровне дескриптора потребовал бы изменения контракта.
+func consumeConfig(file *os.File, p Path) (string, error) {
+	info, err := file.Stat()
 	if err != nil {
 		return "", configIO(p, err)
 	}
-	defer file.Close()
+	if !info.Mode().IsRegular() {
+		return "", &Error{Source: p.Source, Message: "Конфигурация должна быть обычным файлом."}
+	}
 	raw, err := io.ReadAll(io.LimitReader(file, maxFileSize+1))
 	if err != nil {
 		return "", configIO(p, err)
