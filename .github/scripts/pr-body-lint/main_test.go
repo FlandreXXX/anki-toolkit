@@ -502,6 +502,41 @@ func TestListPlaceholders(t *testing.T) {
 	}
 }
 
+// TestHardWrapRejected — регрессия: абзац, разбитый жёстким переносом по ширине
+// колонки, отклоняется. Такой текст склеивается при рендеринге и превращается в
+// рваный; каждая строка абзаца пишется целиком.
+func TestHardWrapRejected(t *testing.T) {
+	long1 := "Абзац описания, намеренно разбитый на строки по ширине терминала,"
+	long2 := "продолжает предложение на следующей строке без пустой между ними."
+	body := bodyWith(map[string]string{"Цель": long1 + "\n" + long2})
+	want := []string{
+		"Жёсткий перенос строки в разделе ## Цель: абзац пишется одной " +
+			"строкой, отдельные абзацы разделяются пустой строкой",
+	}
+	if got := validate(body); !slices.Equal(got, want) {
+		t.Fatalf("нарушения %q, ожидались %q", got, want)
+	}
+	// Тот же текст, разделённый пустой строкой, — два законных абзаца.
+	if got := validate(bodyWith(map[string]string{"Цель": long1 + "\n\n" + long2})); len(got) != 0 {
+		t.Fatalf("раздельные абзацы отклонены: %q", got)
+	}
+	// Соседние короткие строки переносом не считаются: это разные абзацы.
+	if got := validate(bodyWith(map[string]string{"Цель": "Строка.\nЕщё строка."})); len(got) != 0 {
+		t.Fatalf("короткие строки приняты за перенос: %q", got)
+	}
+	// Пункты списка и строки таблицы занимают собственную строку законно.
+	if got := validate(bodyWith(map[string]string{
+		"Изменения": "- " + long1 + "\n- " + long2,
+	})); len(got) != 0 {
+		t.Fatalf("список отклонён как перенос: %q", got)
+	}
+	if got := validate(bodyWith(map[string]string{
+		"Проверки": "| Проверка | Результат |\n| --- | --- |\n| тесты | ok |",
+	})); len(got) != 0 {
+		t.Fatalf("таблица отклонена как перенос: %q", got)
+	}
+}
+
 func TestCodePointLimit(t *testing.T) {
 	base := validBody()
 	if count := utf8.RuneCountInString(base); count >= maxBodyPoints {

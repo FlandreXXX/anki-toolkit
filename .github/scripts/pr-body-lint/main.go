@@ -1,6 +1,7 @@
 // Программа проверяет структуру описания PR: пять обязательных разделов в
 // установленном относительном порядке, содержательный видимый текст каждого
-// раздела и общий предел 10 000 кодовых точек Unicode.
+// раздела, общий предел 10 000 кодовых точек Unicode и отсутствие жёстких
+// переносов строки внутри абзацев.
 //
 // Проверяется структура, а не правдивость содержания: никаких HTTP-запросов,
 // токенов, анализа CI-статусов и бенчмарков здесь нет.
@@ -19,6 +20,11 @@ import (
 )
 
 const (
+	// hardWrapWidth — длина строки, после которой следующая строка абзаца
+	// считается жёстким переносом. Обёртка по ширине колонки реально даёт
+	// строки длиннее этого порога; короткие строки остаются законными.
+	hardWrapWidth = 50
+
 	maxBodyPoints = 10_000
 	usageLine     = "Использование: pr-body-lint (--body-file <путь> | --event-file <путь>)"
 )
@@ -250,6 +256,23 @@ func validate(body string) []string {
 			problems = append(problems, "Раздел содержит только заглушку: ## "+section.name)
 		}
 	}
+	return append(problems, hardWrapProblems(sections)...)
+}
+
+// hardWrapProblems сообщает о жёстких переносах: абзац обычного текста,
+// разбитый на несколько строк без пустой строки между ними. Строки абзаца
+// склеиваются при рендеринге, поэтому перенос по ширине колонки превращает
+// описание в рваный текст. Заголовок, пункт списка, строка таблицы, ограждённый
+// блок, комментарий, цитата и код с отступом абзац прерывают.
+func hardWrapProblems(sections []section) []string {
+	var problems []string
+	for _, current := range sections {
+		if current.wrapped {
+			problems = append(problems, fmt.Sprintf(
+				"Жёсткий перенос строки в разделе ## %s: абзац пишется одной "+
+					"строкой, отдельные абзацы разделяются пустой строкой", current.name))
+		}
+	}
 	return problems
 }
 
@@ -385,6 +408,9 @@ func normalizeNewlines(body string) string {
 type section struct {
 	name  string
 	lines []string
+	// wrapped — признак жёсткого переноса: строка абзаца продолжает предыдущую
+	// длинную строку того же абзаца вместо разделения пустой строкой.
+	wrapped bool
 }
 
 func (s section) content() string {
@@ -403,6 +429,7 @@ type parser struct {
 	fence    *fence
 	comment  bool
 	listCol  int // столбец начала содержимого текущего пункта списка
+	prevLen  int // длина предыдущей строки текущего абзаца
 }
 
 // parseSections выделяет видимые заголовки `##` и видимый текст их разделов.
@@ -429,6 +456,7 @@ func (p *parser) line(line string) {
 	}
 	if closesFence(line, active) {
 		p.fence = nil
+		p.prevLen = 0
 	}
 }
 
@@ -439,6 +467,7 @@ func (p *parser) text(line string) {
 	if blank(line) {
 		// Пустая строка может продолжать пункт списка, поэтому listCol
 		// сохраняется; непустая строка меньшего отступа пункт завершает.
+		p.prevLen = 0
 		return
 	}
 	if indentWidth(line) < p.listCol {
@@ -448,6 +477,7 @@ func (p *parser) text(line string) {
 	// списка: вне списка это четыре пробела, а внутри пункта отступ продолжения
 	// кодом не является. Пока комментарий открыт, отступ на видимость не влияет.
 	if !p.comment && indentWidth(line) >= p.listCol+4 {
+		p.prevLen = 0
 		return
 	}
 	// Ограждение распознаётся по исходной строке, пока комментарий не открыт:
@@ -460,30 +490,50 @@ func (p *parser) text(line string) {
 		if opening, ok := openFence(line, p.listCol); ok {
 			// Ограждённый блок скрывает остаток текста до своего закрытия.
 			p.fence = &opening
+			p.prevLen = 0
 			return
 		}
 		if opening, ok := openListFence(line); ok {
 			p.fence = &opening
+			p.prevLen = 0
 			return
 		}
 	}
 	line = stripComments(line, &p.comment)
 	if blank(line) {
+		p.prevLen = 0
 		return
 	}
 	if col, ok := listItemContent(line); ok {
 		p.listCol = col
 	}
 	if quoted(line) || horizontalRule(line) {
+		p.prevLen = 0
 		return
 	}
 	if name, ok := atxHeading(line); ok {
 		p.sections = append(p.sections, section{name: name})
+		p.prevLen = 0
 		return
 	}
-	if n := len(p.sections); n > 0 {
-		p.sections[n-1].lines = append(p.sections[n-1].lines, line)
+	n := len(p.sections)
+	if n == 0 {
+		return
 	}
+	p.sections[n-1].lines = append(p.sections[n-1].lines, line)
+	// Пункт списка и строка таблицы занимают собственную строку законно;
+	// продолжение абзаца в пункте тоже не проверяется — граница сознательно
+	// узкая, чтобы не отвергать корректные списки.
+	if _, isItem := listItemContent(line); isItem || strings.HasPrefix(strings.TrimLeft(line, " \t"), "|") {
+		p.prevLen = 0
+		return
+	}
+	// Жёсткий перенос — продолжение длинной строки абзаца на следующей строке.
+	// Короткая предыдущая строка означает отдельную строку, а не обёртку.
+	if p.prevLen >= hardWrapWidth {
+		p.sections[n-1].wrapped = true
+	}
+	p.prevLen = utf8.RuneCountInString(line)
 }
 
 // stripComments убирает HTML-комментарии, включая многострочные и незакрытые:
