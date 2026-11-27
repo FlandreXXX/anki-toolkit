@@ -30,8 +30,8 @@ jobs:
       - name: Установить Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version: '1.27.x'
-          # Go-модуля в репозитории нет, кэшировать нечего.
+          go-version-file: go.mod
+          # В модуле нет сторонних зависимостей и go.sum.
           cache: false
 
       # Обе проверки — кандидатные: тесты и утилиты берутся из кода PR.

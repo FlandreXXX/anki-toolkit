@@ -19,6 +19,9 @@
 | [`AGENTS.md`](../../AGENTS.md) | постоянные ограничения: язык, объём и полномочия, доказательность проверок, Git и публикация |
 | [`01-PROJECT-MAP.md`](01-PROJECT-MAP.md) | фактическая структура репозитория, точки входа и владельцы |
 | [`03-VERIFICATION.md`](03-VERIFICATION.md) | фактические команды проверок, границы локальной, сетевой и CI-проверки |
+| [`README.md`](../../README.md) | сборка, запуск, пользовательский CLI и конфигурация |
+| [`docs/architecture.md`](../../docs/architecture.md) | границы приложения, машинный контракт и политика версии |
+| [`docs/threat-model.md`](../../docs/threat-model.md) | модель угроз, приватность и полномочия |
 | [`systematic-debugging/SKILL.md`](../skills/systematic-debugging/SKILL.md) | диагностика причин, остановка непродуктивного поиска и эскалация препятствий; Go-инструменты по необходимости |
 | [`go-best-practices/SKILL.md`](../skills/go-best-practices/SKILL.md) | Go-специфика качества кода, включая тестовый: идиомы языка, выбор решений и зависимостей, архитектура, надёжность и производительность |
 | [`testing/SKILL.md`](../skills/testing/SKILL.md) | выбор проверяемых гарантий, сценариев и уровней, оценка доказательств; для Go применяется вместе с `go-best-practices` |
@@ -31,7 +34,8 @@
 | [`review-report.md`](../skills/coderabbit-review/references/review-report.md) | формат, история и публикация накопительного комментария CodeRabbit |
 | [`pr-body-lint/main.go`](../../.github/scripts/pr-body-lint/main.go) | проверка структуры описания PR по снимку файла или события, без сети |
 | [`coderabbit-comment-lint/main.go`](../../.github/scripts/coderabbit-comment-lint/main.go) | чистая проверка Markdown накопительного отчёта и сверка опубликованных комментариев только на чтение |
-| [`pr-body.yml`](../../.github/workflows/pr-body.yml) | единственный рабочий процесс проверок в репозитории: задача CI `Структура PR`; внешние проверки определяются отдельно |
+| [`pr-body.yml`](../../.github/workflows/pr-body.yml) | задача CI `Структура PR`, включая проверку опубликованного отчёта |
+| [`product.yml`](../../.github/workflows/product.yml) | нативные продуктовые проверки Linux и Windows |
 
 Содержание конкретной задачи определяется поручением. Ponytail остаётся внешним
 владельцем общей инженерной методологии и независимого ревью, но не источником
