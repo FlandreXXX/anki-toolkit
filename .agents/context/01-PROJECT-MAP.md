@@ -2,10 +2,10 @@
 
 ## Назначение
 
-`anki-toolkit` — репозиторий переносимых агентских процессов и проверок: четыре
-скилла (общий Git-процесс, цикл CodeRabbit, практики Go и методология
-тестирования), два Go-валидатора на стандартной библиотеке и один рабочий
-процесс CI, который их прогоняет.
+`anki-toolkit` — репозиторий переносимых агентских процессов и проверок: пять
+скиллов (общий Git-процесс, цикл CodeRabbit, практики Go, методология
+тестирования и систематическая диагностика), два Go-валидатора на стандартной
+библиотеке и один рабочий процесс CI, который их прогоняет.
 
 Реализовано ровно это. Приложения, доменных модулей, пакетного менеджера,
 файлов данных и предметной документации в репозитории нет: `README.md` состоит из
@@ -46,6 +46,12 @@ LICENSE                            # GNU AGPL v3
     │       ├── test-design.md
     │       ├── go-testing.md
     │       └── regression-and-coverage.md
+    ├── systematic-debugging/
+    │   ├── SKILL.md
+    │   └── references/
+    │       ├── diagnostic-workflow.md
+    │       ├── scope-and-escalation.md
+    │       └── go-diagnostics.md
     └── coderabbit-review/
         ├── SKILL.md
         └── references/
@@ -84,6 +90,12 @@ Go-модуля в репозитории нет: ни `go.mod`, ни `go.sum`, 
 
 - `AGENTS.md` — постоянные ограничения: язык, объём и полномочия, доказательность
   проверок, Git и публикация. Процедуры здесь не дублируются.
+- `systematic-debugging` ([`SKILL.md`](../skills/systematic-debugging/SKILL.md)) —
+  доказательная локализация причины и эскалация препятствий. Процесс,
+  границы и Go-инструменты разделены в
+  [`diagnostic-workflow.md`](../skills/systematic-debugging/references/diagnostic-workflow.md),
+  [`scope-and-escalation.md`](../skills/systematic-debugging/references/scope-and-escalation.md) и
+  [`go-diagnostics.md`](../skills/systematic-debugging/references/go-diagnostics.md).
 - `git-workflow` ([`SKILL.md`](../skills/git-workflow/SKILL.md)) — общая процедура
   публикации: ветка, индекс, commit, push, проверка точного удалённого SHA,
   создание и повторное чтение PR, Draft/Ready, конфликты с base, отдельно
