@@ -60,8 +60,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if flags.NArg() > 0 {
 		return usageError(stderr, "лишние позиционные аргументы")
 	}
+	given := make(map[string]bool)
+	flags.Visit(func(item *flag.Flag) { given[item.Name] = true })
 	switch {
-	case *bodyFile != "" && *eventFile != "":
+	case given["body-file"] && given["event-file"]:
 		return usageError(stderr, "флаги --body-file и --event-file взаимоисключающие")
 	case *bodyFile == "" && *eventFile == "":
 		return usageError(stderr, "нужен ровно один режим: --body-file или --event-file")

@@ -617,6 +617,8 @@ func TestUsageErrors(t *testing.T) {
 	}{
 		{name: "без режима", args: nil, wantErr: "ровно один режим"},
 		{name: "оба режима", args: []string{"--body-file", body, "--event-file", event}, wantErr: "взаимоисключающие"},
+		{name: "оба режима, пустой путь события", args: []string{"--body-file", body, "--event-file", ""}, wantErr: "взаимоисключающие"},
+		{name: "оба режима, пустой путь описания", args: []string{"--body-file", "", "--event-file", event}, wantErr: "взаимоисключающие"},
 		{name: "неизвестный флаг", args: []string{"--bogus", "x"}, wantErr: "Ошибка использования"},
 		{name: "лишний позиционный аргумент", args: []string{"--body-file", body, "лишнее"}, wantErr: "лишние позиционные"},
 		{name: "флаг без значения", args: []string{"--body-file"}, wantErr: "Ошибка использования"},
