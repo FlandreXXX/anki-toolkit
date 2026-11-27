@@ -213,7 +213,13 @@ func TestExecutable(t *testing.T) {
 		{name: "версия с испорченной конфигурацией", args: []string{"--config", badConfig, "version"}, text: version.Current},
 		{name: "справка с испорченной конфигурацией", args: []string{"--config", badConfig, "help"}, text: "Использование"},
 	}
-	for _, failure := range readFailureCases(t, blocked) {
+	// Сценарий configuration_io обязателен по контракту: пустой набор означает,
+	// что нативный отказ не проверен, и прогон не должен остаться зелёным.
+	failures := readFailureCases(t, blocked)
+	if len(failures) == 0 {
+		t.Fatal("Набор системных отказов чтения пуст: сценарий configuration_io обязателен.")
+	}
+	for _, failure := range failures {
 		tests = append(tests,
 			scenario{
 				name: failure.name + ": машинный отказ",
