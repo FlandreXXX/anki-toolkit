@@ -257,13 +257,8 @@ func validate(body string) []string {
 	return append(problems, hardWrapProblems(parsed)...)
 }
 
-// hardWrapProblems сообщает о жёстких переносах: абзац обычного текста разбит
-// на несколько физических строк без пустой строки между ними. Строки абзаца
-// склеиваются при рендеринге, поэтому перенос по ширине колонки превращает
-// описание в рваный текст. Нарушение определяется блочной структурой Markdown, а
-// не длиной строки: абзац продолжается только следующей строкой того же абзаца,
-// а заголовок, пункт списка, строка таблицы, подчёркивание заголовка, ограждённый
-// блок, комментарий, цитата и код с отступом его прерывают.
+// hardWrapProblems сообщает о многострочных абзацах обычного текста,
+// выделенных при разборе блоков Markdown.
 func hardWrapProblems(body parsed) []string {
 	var problems []string
 	if wrapped(body.preamble) {
@@ -444,17 +439,14 @@ type fence struct {
 }
 
 type parser struct {
-	sections []section
-	preamble []int
-	fence    *fence
-	comment  bool
-	listCol  int  // столбец начала содержимого текущего пункта списка
-	inTable  bool // предыдущая видимая строка открыла таблицу
-	// Состояние разбора абзаца: строка обычного текста, которая продолжает
-	// текущий абзац, признаётся жёстким переносом. Длина абзаца хранится, чтобы
-	// отличить обычный абзац от строки, оказавшейся шапкой таблицы.
-	paraLines int  // строк обычного текста в текущем абзаце
-	inPara    bool // текущий абзац уже содержит строку текста
+	sections  []section
+	preamble  []int
+	fence     *fence
+	comment   bool
+	listCol   int // столбец начала содержимого текущего пункта списка
+	inTable   bool
+	paraLines int
+	paraHead  string // первая строка абзаца может оказаться шапкой таблицы
 }
 
 // parseSections выделяет видимые заголовки `##`, видимый текст их разделов и
@@ -471,7 +463,7 @@ func parseSections(body string) parsed {
 
 // closePara завершает текущий абзац и запоминает его длину.
 func (p *parser) closePara() {
-	if !p.inPara {
+	if p.paraLines == 0 {
 		return
 	}
 	if n := len(p.sections); n > 0 {
@@ -479,16 +471,8 @@ func (p *parser) closePara() {
 	} else {
 		p.preamble = append(p.preamble, p.paraLines)
 	}
-	p.inPara = false
 	p.paraLines = 0
-}
-
-// textLine засчитывает строку обычного текста в текущий абзац: первая строка
-// начинает абзац, следующая без пустой строки или другого блока его продолжает
-// и делает абзац многострочным.
-func (p *parser) textLine() {
-	p.inPara = true
-	p.paraLines++
+	p.paraHead = ""
 }
 
 func (p *parser) line(line string) {
@@ -505,51 +489,38 @@ func (p *parser) line(line string) {
 	}
 	if closesFence(line, active) {
 		p.fence = nil
-		p.closePara()
 	}
 }
 
-// text обрабатывает строку вне ограждённого блока: снимает HTML-комментарии,
-// отбрасывает код с отступом, цитаты и горизонтальные линии, иначе засчитывает
-// заголовок раздела или текст текущего раздела.
-//
-// Каждый блок, который по правилам Markdown прерывает абзац, закрывает текущий
-// абзац (closePara). Строка обычного текста, пришедшая после такой строки без
-// пустой между ними, продолжает абзац и отмечает жёсткий перенос.
+// text определяет границу или продолжение текущего блока.
 func (p *parser) text(line string) {
 	if blank(line) {
-		// Пустая строка может продолжать пункт списка, поэтому listCol
-		// сохраняется; непустая строка меньшего отступа пункт завершает.
+		// Пустая строка может продолжать пункт списка.
 		p.inTable = false
 		p.closePara()
 		return
 	}
-	if indentWidth(line) < p.listCol {
+	pad := indentWidth(line)
+	if pad < p.listCol {
 		p.listCol = 0
 	}
-	// Блок кода с отступом отсчитывается от начала содержимого текущего пункта
-	// списка: вне списка это четыре пробела, а внутри пункта отступ продолжения
-	// кодом не является. Пока комментарий открыт, отступ на видимость не влияет.
-	if !p.comment && indentWidth(line) >= p.listCol+4 {
-		p.inTable = false
-		p.closePara()
-		return
-	}
-	// Ограждение распознаётся по исходной строке, пока комментарий не открыт:
-	// маркер `<!--` в строке информации о блоке не должен открывать комментарий.
-	// Внутри настоящего комментария ограждение — скрытый текст.
+	inPara := p.paraLines > 0
 	if !p.comment {
-		if col, ok := listItem(line, p.listCol); ok {
-			p.listCol = col
-		}
-		if opening, ok := openFence(line, p.listCol); ok {
-			// Ограждённый блок скрывает остаток текста до своего закрытия.
-			p.fence = &opening
+		if !inPara && pad >= p.listCol+4 {
 			p.inTable = false
-			p.closePara()
 			return
 		}
-		if opening, ok := openListFence(line); ok {
+		// Маркер комментария в строке информации ограждения — литерал.
+		opening, opens := openFence(line, p.listCol)
+		if !opens {
+			if col, start := listItem(line, p.listCol, inPara); col > 0 {
+				if ch, length, ok := fenceMarker(line[start:]); ok {
+					opening, opens = fence{ch: ch, n: length, col: col}, true
+					p.listCol = col
+				}
+			}
+		}
+		if opens {
 			p.fence = &opening
 			p.inTable = false
 			p.closePara()
@@ -557,70 +528,53 @@ func (p *parser) text(line string) {
 		}
 	}
 	line = stripComments(line, &p.comment)
-	if blank(line) {
-		// Строка стала пустой после снятия комментария: видимого текста в ней
-		// нет, поэтому граница абзаца закрывается.
+	switch {
+	case blank(line), quoted(line):
+		p.inTable = false
+		p.closePara()
+		return
+	case inPara && setextUnderline(line):
+		p.paraLines = 0
+		p.paraHead = ""
+		p.appendLine(line)
+		return
+	case horizontalRule(line):
+		p.inTable = false
 		p.closePara()
 		return
 	}
-	// Пункт списка любой вложенности — самостоятельный блок: собственная строка
-	// пункта законна, абзац предыдущего блока закрывается. Содержимое списка
-	// (пункты, их продолжения и вложенные блоки) текстовым абзацем не является,
-	// поэтому правило переноса к нему не применяется.
-	if col, isItem := listItem(line, p.listCol); isItem {
+	if col, _ := listItem(line, p.listCol, inPara); col > 0 {
 		p.listCol = col
 		p.inTable = false
 		p.closePara()
 		p.appendLine(line)
 		return
 	}
-	if quoted(line) || horizontalRule(line) {
-		p.inTable = false
-		p.closePara()
-		return
-	}
-	// Подчёркивание заголовка превращает предыдущую строку в заголовок, а не в
-	// абзац: граница абзаца закрывается, а сама линия блока не продолжает текст.
-	if setextUnderline(line) {
-		p.inTable = false
-		p.closePara()
-		p.appendLine(line)
-		return
-	}
-	// Разделительная строка таблицы доказывает, что предыдущая видимая строка —
-	// заголовок таблицы, а не часть абзаца: она вычитается из текущего абзаца.
-	if tableDelimiter(line) {
-		p.closeParaBeforeTableHeader()
-		p.inTable = true
-		p.appendLine(line)
-		return
-	}
-	if p.inTable && hasUnescapedPipe(line) {
-		// Строки таблицы занимают собственную строку законно.
-		p.closePara()
-		p.appendLine(line)
-		return
-	}
-	p.inTable = false
-	// Заголовок любого уровня прерывает абзац. Обязательным разделом считается
-	// только `##`, остальные уровни остаются содержанием текущего раздела.
-	if name, isSection := atxHeading(line); isSection {
-		p.sections = append(p.sections, section{name: name})
-		p.closePara()
-		return
-	}
+	// Абзац принадлежит разделу, который был открыт до заголовка.
 	if atxHeadingAny(line) {
+		p.inTable = false
 		p.closePara()
-		p.appendLine(line)
+		if name, isSection := atxHeading(line); isSection {
+			p.sections = append(p.sections, section{name: name})
+		} else {
+			p.appendLine(line)
+		}
 		return
 	}
 	p.appendLine(line)
-	if p.listCol > 0 {
-		// Строка внутри списка — содержимое пункта, а не абзац обычного текста.
-		p.closePara()
+	if p.listCol > 0 || p.inTable {
 		return
 	}
-	p.textLine()
+	if p.paraLines == 1 && tableHeader(p.paraHead, line) {
+		p.paraLines = 0
+		p.paraHead = ""
+		p.inTable = true
+		return
+	}
+	if !inPara {
+		p.paraHead = line
+	}
+	p.paraLines++
 }
 
 // appendLine добавляет видимую строку в текст текущего раздела; строки
@@ -763,20 +717,6 @@ func openFence(line string, listCol int) (fence, bool) {
 	return fence{ch: ch, n: length}, true
 }
 
-// openListFence распознаёт ограждённый блок, начатый в той же строке, что и
-// пункт списка: GitHub считает такой блок кодом, а не разделом описания.
-func openListFence(line string) (fence, bool) {
-	col, ok := listItem(line, 0)
-	if !ok {
-		return fence{}, false
-	}
-	ch, length, ok := fenceMarker(line[col:])
-	if !ok {
-		return fence{}, false
-	}
-	return fence{ch: ch, n: length, col: col}, true
-}
-
 // fenceMarker возвращает символ и длину маркера ограждения не короче трёх
 // символов. Строка информации о блоке в обратных кавычках не может содержать `.
 func fenceMarker(text string) (byte, int, bool) {
@@ -822,9 +762,7 @@ func closesFence(line string, active fence) bool {
 	return strings.Trim(text[length:], " \t") == ""
 }
 
-// atxHeadingAny сообщает, что строка — заголовок ATX любого уровня от `#` до
-// `######` с обязательным пробельным символом после решёток. Такой заголовок
-// прерывает абзац, но разделом описания не становится.
+// atxHeadingAny распознаёт границу блока, включая пустые заголовки ATX.
 func atxHeadingAny(line string) bool {
 	pad := leadingSpaces(line)
 	if pad > 3 || pad == len(line) {
@@ -835,10 +773,10 @@ func atxHeadingAny(line string) bool {
 	for hashes < len(text) && text[hashes] == '#' {
 		hashes++
 	}
-	if hashes == 0 || hashes > 6 || hashes == len(text) {
+	if hashes == 0 || hashes > 6 {
 		return false
 	}
-	return text[hashes] == ' ' || text[hashes] == '\t'
+	return hashes == len(text) || text[hashes] == ' ' || text[hashes] == '\t'
 }
 
 // setextUnderline распознаёт подчёркивание заголовка: строка только из `=` или
@@ -866,15 +804,13 @@ func setextUnderline(line string) bool {
 	return true
 }
 
-// tableDelimiter распознаёт разделительную строку таблицы GFM: ячейки из `-` и
-// необязательного `:`, разделённые `|`. Внешние вертикальные черты не обязательны.
-func tableDelimiter(line string) bool {
-	text := strings.TrimSpace(line)
-	if text == "" || !strings.ContainsAny(text, "|-") {
+// tableHeader проверяет пару строк до переклассификации абзаца в таблицу.
+func tableHeader(header, delimiter string) bool {
+	if indentWidth(delimiter) > 3 {
 		return false
 	}
-	cells := splitTableCells(text)
-	if len(cells) == 0 {
+	cells := splitTableCells(delimiter)
+	if len(cells) == 0 || len(cells) != len(splitTableCells(header)) {
 		return false
 	}
 	for _, cell := range cells {
@@ -924,60 +860,24 @@ func splitTableCells(text string) []string {
 	return cells
 }
 
-// hasUnescapedPipe сообщает, что строка содержит `|`, не экранированную обратным
-// слэшем: так выглядит строка таблицы GFM, в том числе без внешних черт.
-func hasUnescapedPipe(line string) bool {
-	escaped := false
-	for i := 0; i < len(line); i++ {
-		switch line[i] {
-		case '\\':
-			escaped = !escaped
-		case '|':
-			if !escaped {
-				return true
-			}
-			escaped = false
-		default:
-			escaped = false
-		}
+// listItem возвращает столбец и байтовую позицию начала содержимого
+// допустимого пункта. Нулевой столбец означает, что строка не открывает пункт.
+func listItem(line string, parentCol int, inPara bool) (col, start int) {
+	pad, index := leadColumns(line)
+	if pad > parentCol+3 {
+		return 0, 0
 	}
-	return false
-}
-
-// listItem распознаёт пункт списка любого уровня вложенности: отступ меньше
-// четырёх пробелов от начала содержимого текущего пункта считается новым блоком,
-// а не продолжением кода. Второй результат — является ли строка пунктом списка.
-func listItem(line string, parentCol int) (int, bool) {
-	pad := indentWidth(line)
-	base := parentCol
-	if pad < base {
-		base = 0
-	}
-	if pad > base+3 {
-		return 0, false
-	}
-	rest := line[leadingSpaces(line):]
+	rest := line[index:]
 	marker := listMarkerLen(rest)
 	if marker == 0 {
-		return 0, false
+		return 0, 0
 	}
-	col := pad + marker
-	for col < len(line) && (line[col] == ' ' || line[col] == '\t') {
-		col++
+	width, spaces := leadColumns(rest[marker:])
+	start = index + marker + spaces
+	if inPara && (start == len(line) || marker > 1 && strings.TrimLeft(rest[:marker-1], "0") != "1") {
+		return 0, 0
 	}
-	return col, true
-}
-
-// closeParaBeforeTableHeader отменяет абзац, который оказался заголовком
-// таблицы: разделительная строка доказывает, что единственная видимая строка
-// перед ней — шапка, а не текст абзаца.
-func (p *parser) closeParaBeforeTableHeader() {
-	if p.paraLines == 1 {
-		p.inPara = false
-		p.paraLines = 0
-		return
-	}
-	p.closePara()
+	return pad + marker + width, start
 }
 
 // atxHeading распознаёт заголовок ровно второго уровня: отступ до трёх
