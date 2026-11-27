@@ -19,6 +19,7 @@
 | [`AGENTS.md`](../../AGENTS.md) | постоянные ограничения: язык, объём и полномочия, доказательность проверок, Git и публикация |
 | [`01-PROJECT-MAP.md`](01-PROJECT-MAP.md) | фактическая структура репозитория, точки входа и владельцы |
 | [`03-VERIFICATION.md`](03-VERIFICATION.md) | фактические команды проверок, границы локальной, сетевой и CI-проверки |
+| [`systematic-debugging/SKILL.md`](../skills/systematic-debugging/SKILL.md) | диагностика причин, остановка непродуктивного поиска и эскалация препятствий; Go-инструменты по необходимости |
 | [`go-best-practices/SKILL.md`](../skills/go-best-practices/SKILL.md) | Go-специфика качества кода, включая тестовый: идиомы языка, выбор решений и зависимостей, архитектура, надёжность и производительность |
 | [`testing/SKILL.md`](../skills/testing/SKILL.md) | выбор проверяемых гарантий, сценариев и уровней, оценка доказательств; для Go применяется вместе с `go-best-practices` |
 | [`git-workflow/SKILL.md`](../skills/git-workflow/SKILL.md) | общая механика ветки, индекса, коммита, push, проверки удалённого SHA, PR, Draft/Ready, merge |
