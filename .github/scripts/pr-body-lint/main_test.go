@@ -215,7 +215,7 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name: "несколько заглушек вместо текста",
-			body: strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "TODO\nTBD\n—", 1),
+			body: strings.Replace(validBody(), "Запуск ещё не завершён, отметка pending.", "TODO\n\nTBD\n\n—", 1),
 			want: []string{"Раздел содержит только заглушку: ## CI"},
 		},
 		{
@@ -502,12 +502,205 @@ func TestListPlaceholders(t *testing.T) {
 	}
 }
 
+// wrapProblem — ожидаемая диагностика жёсткого переноса; эталон выведен из
+// контракта Markdown (один абзац — одна физическая строка), а не из параметров
+// реализации.
+func wrapProblem(section string) string {
+	return "Жёсткий перенос строки в разделе ## " + section + ": " +
+		"абзац пишется одной строкой, отдельные абзацы разделяются пустой строкой"
+}
+
+const preambleWrapProblem = "Жёсткий перенос строки в тексте перед первым разделом: " +
+	"абзац пишется одной строкой, отдельные абзацы разделяются пустой строкой"
+
+// TestHardWrapRejected — регрессия: абзац обычного текста, разбитый на несколько
+// физических строк без пустой строки между ними, отклоняется. GitHub склеивает
+// такие строки в один абзац, поэтому в узкой колонке текст рассыпается на рваные
+// куски. Длина строки на решение не влияет: две короткие соседние строки — такое
+// же нарушение, как и перенос по ширине колонки.
+func TestHardWrapRejected(t *testing.T) {
+	t.Run("перенос длинной строки", func(t *testing.T) {
+		body := bodyWith(map[string]string{"Цель": "Абзац описания, намеренно разбитый на строки по ширине терминала,\n" +
+			"продолжает предложение на следующей строке без пустой между ними."})
+		if got := validate(body); !slices.Equal(got, []string{wrapProblem("Цель")}) {
+			t.Fatalf("нарушения %q, ожидались %q", got, []string{wrapProblem("Цель")})
+		}
+	})
+	t.Run("две короткие соседние строки", func(t *testing.T) {
+		if got := validate(bodyWith(map[string]string{"Цель": "Строка.\nЕщё строка."})); !slices.Equal(got, []string{wrapProblem("Цель")}) {
+			t.Fatalf("короткие соседние строки приняты за разные абзацы: %q", got)
+		}
+	})
+	t.Run("три строки одного абзаца", func(t *testing.T) {
+		body := bodyWith(map[string]string{"Цель": "Первая строка абзаца.\nВторая строка.\nТретья строка."})
+		if got := validate(body); !slices.Equal(got, []string{wrapProblem("Цель")}) {
+			t.Fatalf("нарушения %q, ожидались %q", got, []string{wrapProblem("Цель")})
+		}
+	})
+	t.Run("один длинный абзац принимается", func(t *testing.T) {
+		long := "Один плотный абзац любой длины остаётся законным, пока он занимает " +
+			"ровно одну физическую строку и не разбит переносом по ширине окна."
+		if got := validate(bodyWith(map[string]string{"Цель": long})); len(got) != 0 {
+			t.Fatalf("один абзац отклонён: %q", got)
+		}
+	})
+	t.Run("два абзаца через пустую строку принимаются", func(t *testing.T) {
+		if got := validate(bodyWith(map[string]string{"Цель": "Первый абзац.\n\nВторой абзац."})); len(got) != 0 {
+			t.Fatalf("раздельные абзацы отклонены: %q", got)
+		}
+	})
+	t.Run("перенос в преамбуле", func(t *testing.T) {
+		body := "Вступление без раздела.\nПродолжение вступления.\n\n" + validBody()
+		if got := validate(body); !slices.Equal(got, []string{preambleWrapProblem}) {
+			t.Fatalf("нарушения %q, ожидались %q", got, []string{preambleWrapProblem})
+		}
+	})
+	t.Run("преамбула одной строкой принимается", func(t *testing.T) {
+		body := "Вступление одной строкой без переноса.\n\n" + validBody()
+		if got := validate(body); len(got) != 0 {
+			t.Fatalf("преамбула отклонена: %q", got)
+		}
+	})
+}
+
+// TestHardWrapAcceptsOtherBlocks — регрессия: блоки, которые по правилам GFM
+// прерывают абзац, не считаются переносом обычного абзаца. Проверяются
+// заголовки других уровней, таблицы с внешними разделителями и без них, списки с
+// продолжениями, подчёркивание заголовка, код и цитаты.
+func TestHardWrapAcceptsOtherBlocks(t *testing.T) {
+	cases := map[string]string{
+		"заголовок третьего уровня":        "### Подзаголовок\nТекст после заголовка.",
+		"заголовок первого уровня":         "# Подзаголовок\nТекст после заголовка.",
+		"заголовок шестого уровня":         "###### Подзаголовок\nТекст после заголовка.",
+		"таблица с внешними разделителями": "| Проверка | Результат |\n| --- | --- |\n| тесты | ok |",
+		"таблица без внешних разделителей": "Проверка | Результат\n--- | ---\nтесты | ok",
+		"пункты списка":                    "- первый пункт\n- второй пункт",
+		"продолжение пункта списка":        "- пункт\n  продолжение пункта",
+		"нумерованный список":              "1. первый пункт\n2. второй пункт",
+		"вложенный список":                 "- пункт\n  - вложенный пункт\n  - ещё один",
+		"подчёркивание заголовка":          "Текст заголовка\n=========",
+		"ограждённый код":                  "Текст раздела.\n\n```\nпервая строка кода\nвторая строка кода\n```",
+		"код с отступом":                   "Текст раздела.\n\n    первая строка кода\n    вторая строка кода",
+		"цитата":                           "Текст раздела.\n\n> первая строка цитаты\n> вторая строка цитаты",
+		"пункт и текст после него":         "- пункт списка\n\nОбычный абзац после списка.",
+	}
+	for name, text := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := validate(bodyWith(map[string]string{"Цель": text})); len(got) != 0 {
+				t.Fatalf("законный блок отклонён как перенос абзаца: %q", got)
+			}
+		})
+	}
+	// Содержимое блока не маскирует перенос обычного абзаца рядом с ним.
+	body := bodyWith(map[string]string{
+		"Цель": "Абзац перед списком.\nВторой абзац без пустой строки.\n\n- пункт списка",
+	})
+	if got := validate(body); !slices.Equal(got, []string{wrapProblem("Цель")}) {
+		t.Fatalf("нарушения %q, ожидались %q", got, []string{wrapProblem("Цель")})
+	}
+	// GFM: таблица не прерывает абзац. Строка таблицы, приписанная к абзацу без
+	// пустой строки, остаётся продолжением этого абзаца и потому переносом является.
+	body = bodyWith(map[string]string{
+		"Цель": "Абзац описания.\n| A | B |\n| --- | --- |",
+	})
+	if got := validate(body); !slices.Equal(got, []string{wrapProblem("Цель")}) {
+		t.Fatalf("нарушения %q, ожидались %q", got, []string{wrapProblem("Цель")})
+	}
+}
+
+func TestHardWrapBlockContext(t *testing.T) {
+	const table = "| A | B |\n| --- | --- |\n"
+	cases := []struct {
+		name    string
+		text    string
+		wrapped bool
+	}{
+		{"разное число ячеек", "| A | B |\n| --- |\n| Строка |", true},
+		{"разделитель без заголовка", "| --- | --- |\nПервая строка\nВторая строка", true},
+		{"текст перед многоячеечным разделителем", "Обычный текст\n| --- | --- |\nСтрока", true},
+		{"таблица без прерывания абзаца с последующим текстом", "Абзац\n" + table + "Строка", true},
+		{"экранированная черта в заголовке", "A \\| B | C\n--- | ---\nЗначение", false},
+		{"экранированная черта не разделяет ячейки", "A \\| B\n--- | ---\nСтрока", true},
+		{"заголовок таблицы из одной ячейки", "Поле\n| --- |\nПервая строка\nВторая строка", false},
+		{"разное число ячеек в строках таблицы", table + "Одна\nЕщё одна\n| A | B | C |", false},
+		{"пустая строка завершает таблицу", table + "Ячейка\n\nАбзац\nПродолжение", true},
+		{"заголовок завершает таблицу", table + "Ячейка\n### Подзаголовок\nАбзац\nПродолжение", true},
+		{"цитата завершает таблицу", table + "Ячейка\n> Цитата\nАбзац\nПродолжение", true},
+		{"ограждение завершает таблицу", table + "Ячейка\n~~~\nКод\n~~~\nАбзац\nПродолжение", true},
+		{"горизонтальная линия завершает таблицу", table + "Ячейка\n---\nАбзац\nПродолжение", true},
+		{"порядковый номер с точкой", "Абзац\n2. Продолжение", true},
+		{"порядковый номер со скобкой", "Абзац\n2) Продолжение", true},
+		{"отвергнутый пункт с маркером ограждения", "Абзац\n2. ```text\n   Продолжение", true},
+		{"пустой нумерованный пункт", "Абзац\n1.", true},
+		{"пустой маркированный пункт", "Абзац\n+", true},
+		{"непустой первый пункт", "Абзац\n1. Пункт\n2. Второй пункт", false},
+		{"первый пункт с ведущим нулём", "Абзац\n01) Пункт", false},
+		{"нумерация с двух после пустой строки", "Абзац\n\n2. Пункт", false},
+		{"отступ внутри абзаца", "Абзац\n    Продолжение", true},
+		{"вложенный блок кода", "- Пункт\n\n      Первая строка кода\n      Вторая строка кода", false},
+		{"многострочный Setext первого уровня", "Первая строка заголовка\nВторая строка\n===", false},
+		{"многострочный Setext второго уровня", "Первая строка заголовка\nВторая строка\n---", false},
+		{"отдельный Setext", "Абзац\nПродолжение\n\nОтдельный заголовок\n===", true},
+		{"отдельная горизонтальная линия", "Абзац\nПродолжение\n\n---", true},
+		{"подчёркивание без текста", "===\nОбычный текст", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var want []string
+			if tc.wrapped {
+				want = []string{wrapProblem("Цель")}
+			}
+			body := bodyWith(map[string]string{"Цель": tc.text})
+			if got := validate(body); !slices.Equal(got, want) {
+				t.Fatalf("нарушения %q, ожидались %q", got, want)
+			}
+		})
+	}
+}
+
+func TestHardWrapSectionOwnership(t *testing.T) {
+	const paragraph = "Первая строка.\nВторая строка."
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"преамбула перед заголовком", paragraph + "\n" + validBody(), []string{preambleWrapProblem}},
+		{"абзац перед следующим разделом",
+			strings.Replace(bodyWith(map[string]string{"Цель": paragraph}), "\n\n## Изменения", "\n## Изменения", 1),
+			[]string{wrapProblem("Цель")}},
+		{"порядок нарушений",
+			paragraph + "\n" + strings.ReplaceAll(bodyWith(map[string]string{"Цель": paragraph, "CI": paragraph}), "\n\n## ", "\n## "),
+			[]string{preambleWrapProblem, wrapProblem("Цель"), wrapProblem("CI")}},
+		{"Setext не образует обязательного раздела",
+			strings.Replace(validBody(), "## Цель\n", "Цель\n---\n", 1),
+			[]string{"Отсутствует обязательный заголовок: ## Цель"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validate(tc.body); !slices.Equal(got, tc.want) {
+				t.Fatalf("нарушения %q, ожидались %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// padBody дописывает заполнитель в конец последней физической строки описания:
+// так проверяемый лимит растёт, а форма абзацев не меняется и правило переноса
+// не влияет на результат.
+func padBody(base, filler string, count int) string {
+	return strings.TrimSuffix(base, "\n") + strings.Repeat(filler, count) + "\n"
+}
+
 func TestCodePointLimit(t *testing.T) {
 	base := validBody()
 	if count := utf8.RuneCountInString(base); count >= maxBodyPoints {
 		t.Fatalf("базовое описание уже длиннее лимита: %d", count)
 	}
-	exact := base + strings.Repeat("😀", maxBodyPoints-utf8.RuneCountInString(base))
+	exact := padBody(base, "😀", maxBodyPoints-utf8.RuneCountInString(base))
+	if count := utf8.RuneCountInString(exact); count != maxBodyPoints {
+		t.Fatalf("заполнитель дал %d кодовых точек вместо %d", count, maxBodyPoints)
+	}
 	if got := validate(exact); len(got) != 0 {
 		t.Fatalf("ровно %d кодовых точек отклонены: %q", maxBodyPoints, got)
 	}
@@ -517,7 +710,7 @@ func TestCodePointLimit(t *testing.T) {
 		t.Fatalf("диагностика лимита без фактического числа: %q", got)
 	}
 	// Кириллица: байты превышают лимит, кодовые точки — нет.
-	cyrillic := base + strings.Repeat("я", maxBodyPoints-utf8.RuneCountInString(base))
+	cyrillic := padBody(base, "я", maxBodyPoints-utf8.RuneCountInString(base))
 	if len(cyrillic) <= maxBodyPoints {
 		t.Fatalf("ожидался вход длиннее лимита в байтах: %d", len(cyrillic))
 	}
@@ -539,7 +732,7 @@ func TestLineEndingsNormalized(t *testing.T) {
 		})
 	}
 	// CRLF не должен съедать одну кодовую точку из лимита.
-	exact := base + strings.Repeat("😀", maxBodyPoints-utf8.RuneCountInString(base))
+	exact := padBody(base, "😀", maxBodyPoints-utf8.RuneCountInString(base))
 	crlf := strings.ReplaceAll(exact, "\n", "\r\n")
 	if got := validate(crlf); len(got) != 0 {
 		t.Fatalf("CRLF сдвинул границу лимита: %q", got)
@@ -617,6 +810,8 @@ func TestUsageErrors(t *testing.T) {
 	}{
 		{name: "без режима", args: nil, wantErr: "ровно один режим"},
 		{name: "оба режима", args: []string{"--body-file", body, "--event-file", event}, wantErr: "взаимоисключающие"},
+		{name: "оба режима, пустой путь события", args: []string{"--body-file", body, "--event-file", ""}, wantErr: "взаимоисключающие"},
+		{name: "оба режима, пустой путь описания", args: []string{"--body-file", "", "--event-file", event}, wantErr: "взаимоисключающие"},
 		{name: "неизвестный флаг", args: []string{"--bogus", "x"}, wantErr: "Ошибка использования"},
 		{name: "лишний позиционный аргумент", args: []string{"--body-file", body, "лишнее"}, wantErr: "лишние позиционные"},
 		{name: "флаг без значения", args: []string{"--body-file"}, wantErr: "Ошибка использования"},

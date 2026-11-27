@@ -25,13 +25,13 @@
 | [`git-workflow/SKILL.md`](../skills/git-workflow/SKILL.md) | общая механика ветки, индекса, коммита, push, проверки удалённого SHA, PR, Draft/Ready, merge |
 | [`publication.md`](../skills/git-workflow/references/publication.md) | порядок публикации коммита: ветка, индекс, commit, push, удалённое постусловие, протокол неизвестного результата |
 | [`pr-body.md`](../skills/git-workflow/references/pr-body.md) | содержание описания PR: пять разделов, лимит 10 000 кодовых точек, локальная проверка описания |
-| [`pr-lifecycle.md`](../skills/git-workflow/references/pr-lifecycle.md) | идентификация PR, публикация и повторное чтение, Ready, merge, конфликты с base, очистка, роль CI |
+| [`pr-lifecycle.md`](../skills/git-workflow/references/pr-lifecycle.md) | локальные артефакты задачи, идентификация PR, публикация и повторное чтение, Ready, merge, конфликты с base, очистка, роль CI |
 | [`coderabbit-review/SKILL.md`](../skills/coderabbit-review/SKILL.md) | явно запрошенный цикл CodeRabbit: активация, число итераций, независимая оценка замечаний, границы полномочий |
 | [`review-workflow.md`](../skills/coderabbit-review/references/review-workflow.md) | процедура цикла: исходное состояние, интерфейс CLI, доказательство нового ревью, завершение итерации |
 | [`review-report.md`](../skills/coderabbit-review/references/review-report.md) | формат, история и публикация накопительного комментария CodeRabbit |
 | [`pr-body-lint/main.go`](../../.github/scripts/pr-body-lint/main.go) | проверка структуры описания PR по снимку файла или события, без сети |
 | [`coderabbit-comment-lint/main.go`](../../.github/scripts/coderabbit-comment-lint/main.go) | чистая проверка Markdown накопительного отчёта и сверка опубликованных комментариев только на чтение |
-| [`pr-body.yml`](../../.github/workflows/pr-body.yml) | единственный CI репозитория: job `Структура PR` |
+| [`pr-body.yml`](../../.github/workflows/pr-body.yml) | единственный рабочий процесс проверок в репозитории: задача CI `Структура PR`; внешние проверки определяются отдельно |
 
 Содержание конкретной задачи определяется поручением. Ponytail остаётся внешним
 владельцем общей инженерной методологии и независимого ревью, но не источником

@@ -527,8 +527,7 @@ func TestLiteralCommentMarker(t *testing.T) {
 	}
 }
 
-// TestEscapedPipe — разделение ячеек только по неэкранированной черте с учётом
-// чётности обратных слэшей.
+// TestEscapedPipe — разделение ячеек только по неэкранированной черте.
 func TestEscapedPipe(t *testing.T) {
 	cases := []struct {
 		name string
