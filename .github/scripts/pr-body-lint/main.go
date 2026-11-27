@@ -20,13 +20,11 @@ import (
 )
 
 const (
-	// hardWrapWidth — длина строки, после которой следующая строка абзаца
-	// считается жёстким переносом. Обёртка по ширине колонки реально даёт
-	// строки длиннее этого порога; короткие строки остаются законными.
-	hardWrapWidth = 50
-
 	maxBodyPoints = 10_000
 	usageLine     = "Использование: pr-body-lint (--body-file <путь> | --event-file <путь>)"
+
+	// wrapHint — общая часть диагностики: формулировка правила, а не адрес.
+	wrapHint = "абзац пишется одной строкой, отдельные абзацы разделяются пустой строкой"
 )
 
 // requiredSections задаёт обязательные разделы в требуемом относительном порядке.
@@ -227,9 +225,9 @@ func validate(body string) []string {
 	if strings.TrimSpace(body) == "" {
 		return []string{"Описание PR пустое: нужны обязательные разделы " + headingList(requiredSections)}
 	}
-	sections := parseSections(body)
-	names := make([]string, len(sections))
-	for i, section := range sections {
+	parsed := parseSections(body)
+	names := make([]string, len(parsed.sections))
+	for i, section := range parsed.sections {
 		names[i] = section.name
 	}
 	var problems []string
@@ -244,7 +242,7 @@ func validate(body string) []string {
 	if len(problems) == 0 {
 		problems = append(problems, orderProblems(names)...)
 	}
-	for _, section := range sections {
+	for _, section := range parsed.sections {
 		if !isRequired(section.name) {
 			continue
 		}
@@ -256,24 +254,37 @@ func validate(body string) []string {
 			problems = append(problems, "Раздел содержит только заглушку: ## "+section.name)
 		}
 	}
-	return append(problems, hardWrapProblems(sections)...)
+	return append(problems, hardWrapProblems(parsed)...)
 }
 
-// hardWrapProblems сообщает о жёстких переносах: абзац обычного текста,
-// разбитый на несколько строк без пустой строки между ними. Строки абзаца
+// hardWrapProblems сообщает о жёстких переносах: абзац обычного текста разбит
+// на несколько физических строк без пустой строки между ними. Строки абзаца
 // склеиваются при рендеринге, поэтому перенос по ширине колонки превращает
-// описание в рваный текст. Заголовок, пункт списка, строка таблицы, ограждённый
-// блок, комментарий, цитата и код с отступом абзац прерывают.
-func hardWrapProblems(sections []section) []string {
+// описание в рваный текст. Нарушение определяется блочной структурой Markdown, а
+// не длиной строки: абзац продолжается только следующей строкой того же абзаца,
+// а заголовок, пункт списка, строка таблицы, подчёркивание заголовка, ограждённый
+// блок, комментарий, цитата и код с отступом его прерывают.
+func hardWrapProblems(body parsed) []string {
 	var problems []string
-	for _, current := range sections {
-		if current.wrapped {
-			problems = append(problems, fmt.Sprintf(
-				"Жёсткий перенос строки в разделе ## %s: абзац пишется одной "+
-					"строкой, отдельные абзацы разделяются пустой строкой", current.name))
+	if wrapped(body.preamble) {
+		problems = append(problems, "Жёсткий перенос строки в тексте перед первым разделом: "+wrapHint)
+	}
+	for _, current := range body.sections {
+		if wrapped(current.runs) {
+			problems = append(problems, "Жёсткий перенос строки в разделе ## "+current.name+": "+wrapHint)
 		}
 	}
 	return problems
+}
+
+// wrapped сообщает, есть ли среди абзацев хотя бы один многострочный.
+func wrapped(runs []int) bool {
+	for _, length := range runs {
+		if length > 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func headingList(names []string) string {
@@ -408,13 +419,21 @@ func normalizeNewlines(body string) string {
 type section struct {
 	name  string
 	lines []string
-	// wrapped — признак жёсткого переноса: строка абзаца продолжает предыдущую
-	// длинную строку того же абзаца вместо разделения пустой строкой.
-	wrapped bool
+	// runs хранит длины абзацев обычного текста, найденных в этом разделе:
+	// абзац длиной больше одной строки — жёсткий перенос.
+	runs []int
 }
 
 func (s section) content() string {
 	return strings.Join(s.lines, "\n")
+}
+
+// parsed — результат разбора описания: преамбула перед первым видимым `##` и
+// найденные разделы. Преамбула не участвует в проверке разделов, но участвует в
+// проверке абзацев: перенос в ней — такое же нарушение формы.
+type parsed struct {
+	preamble []int
+	sections []section
 }
 
 // fence описывает активный ограждённый блок кода.
@@ -426,20 +445,50 @@ type fence struct {
 
 type parser struct {
 	sections []section
+	preamble []int
 	fence    *fence
 	comment  bool
-	listCol  int // столбец начала содержимого текущего пункта списка
-	prevLen  int // длина предыдущей строки текущего абзаца
+	listCol  int  // столбец начала содержимого текущего пункта списка
+	inTable  bool // предыдущая видимая строка открыла таблицу
+	// Состояние разбора абзаца: строка обычного текста, которая продолжает
+	// текущий абзац, признаётся жёстким переносом. Длина абзаца хранится, чтобы
+	// отличить обычный абзац от строки, оказавшейся шапкой таблицы.
+	paraLines int  // строк обычного текста в текущем абзаце
+	inPara    bool // текущий абзац уже содержит строку текста
 }
 
-// parseSections выделяет видимые заголовки `##` и видимый текст их разделов.
-// Ожидает текст с уже нормализованными переводами строк (validate).
-func parseSections(body string) []section {
+// parseSections выделяет видимые заголовки `##`, видимый текст их разделов и
+// длины абзацев обычного текста. Ожидает текст с уже нормализованными
+// переводами строк (validate).
+func parseSections(body string) parsed {
 	p := &parser{}
 	for line := range strings.SplitSeq(body, "\n") {
 		p.line(line)
 	}
-	return p.sections
+	p.closePara()
+	return parsed{preamble: p.preamble, sections: p.sections}
+}
+
+// closePara завершает текущий абзац и запоминает его длину.
+func (p *parser) closePara() {
+	if !p.inPara {
+		return
+	}
+	if n := len(p.sections); n > 0 {
+		p.sections[n-1].runs = append(p.sections[n-1].runs, p.paraLines)
+	} else {
+		p.preamble = append(p.preamble, p.paraLines)
+	}
+	p.inPara = false
+	p.paraLines = 0
+}
+
+// textLine засчитывает строку обычного текста в текущий абзац: первая строка
+// начинает абзац, следующая без пустой строки или другого блока его продолжает
+// и делает абзац многострочным.
+func (p *parser) textLine() {
+	p.inPara = true
+	p.paraLines++
 }
 
 func (p *parser) line(line string) {
@@ -456,18 +505,23 @@ func (p *parser) line(line string) {
 	}
 	if closesFence(line, active) {
 		p.fence = nil
-		p.prevLen = 0
+		p.closePara()
 	}
 }
 
 // text обрабатывает строку вне ограждённого блока: снимает HTML-комментарии,
 // отбрасывает код с отступом, цитаты и горизонтальные линии, иначе засчитывает
 // заголовок раздела или текст текущего раздела.
+//
+// Каждый блок, который по правилам Markdown прерывает абзац, закрывает текущий
+// абзац (closePara). Строка обычного текста, пришедшая после такой строки без
+// пустой между ними, продолжает абзац и отмечает жёсткий перенос.
 func (p *parser) text(line string) {
 	if blank(line) {
 		// Пустая строка может продолжать пункт списка, поэтому listCol
 		// сохраняется; непустая строка меньшего отступа пункт завершает.
-		p.prevLen = 0
+		p.inTable = false
+		p.closePara()
 		return
 	}
 	if indentWidth(line) < p.listCol {
@@ -477,63 +531,104 @@ func (p *parser) text(line string) {
 	// списка: вне списка это четыре пробела, а внутри пункта отступ продолжения
 	// кодом не является. Пока комментарий открыт, отступ на видимость не влияет.
 	if !p.comment && indentWidth(line) >= p.listCol+4 {
-		p.prevLen = 0
+		p.inTable = false
+		p.closePara()
 		return
 	}
 	// Ограждение распознаётся по исходной строке, пока комментарий не открыт:
 	// маркер `<!--` в строке информации о блоке не должен открывать комментарий.
 	// Внутри настоящего комментария ограждение — скрытый текст.
 	if !p.comment {
-		if col, ok := listItemContent(line); ok {
+		if col, ok := listItem(line, p.listCol); ok {
 			p.listCol = col
 		}
 		if opening, ok := openFence(line, p.listCol); ok {
 			// Ограждённый блок скрывает остаток текста до своего закрытия.
 			p.fence = &opening
-			p.prevLen = 0
+			p.inTable = false
+			p.closePara()
 			return
 		}
 		if opening, ok := openListFence(line); ok {
 			p.fence = &opening
-			p.prevLen = 0
+			p.inTable = false
+			p.closePara()
 			return
 		}
 	}
 	line = stripComments(line, &p.comment)
 	if blank(line) {
-		p.prevLen = 0
+		// Строка стала пустой после снятия комментария: видимого текста в ней
+		// нет, поэтому граница абзаца закрывается.
+		p.closePara()
 		return
 	}
-	if col, ok := listItemContent(line); ok {
+	// Пункт списка любой вложенности — самостоятельный блок: собственная строка
+	// пункта законна, абзац предыдущего блока закрывается. Содержимое списка
+	// (пункты, их продолжения и вложенные блоки) текстовым абзацем не является,
+	// поэтому правило переноса к нему не применяется.
+	if col, isItem := listItem(line, p.listCol); isItem {
 		p.listCol = col
+		p.inTable = false
+		p.closePara()
+		p.appendLine(line)
+		return
 	}
 	if quoted(line) || horizontalRule(line) {
-		p.prevLen = 0
+		p.inTable = false
+		p.closePara()
 		return
 	}
-	if name, ok := atxHeading(line); ok {
+	// Подчёркивание заголовка превращает предыдущую строку в заголовок, а не в
+	// абзац: граница абзаца закрывается, а сама линия блока не продолжает текст.
+	if setextUnderline(line) {
+		p.inTable = false
+		p.closePara()
+		p.appendLine(line)
+		return
+	}
+	// Разделительная строка таблицы доказывает, что предыдущая видимая строка —
+	// заголовок таблицы, а не часть абзаца: она вычитается из текущего абзаца.
+	if tableDelimiter(line) {
+		p.closeParaBeforeTableHeader()
+		p.inTable = true
+		p.appendLine(line)
+		return
+	}
+	if p.inTable && hasUnescapedPipe(line) {
+		// Строки таблицы занимают собственную строку законно.
+		p.closePara()
+		p.appendLine(line)
+		return
+	}
+	p.inTable = false
+	// Заголовок любого уровня прерывает абзац. Обязательным разделом считается
+	// только `##`, остальные уровни остаются содержанием текущего раздела.
+	if name, isSection := atxHeading(line); isSection {
 		p.sections = append(p.sections, section{name: name})
-		p.prevLen = 0
+		p.closePara()
 		return
 	}
-	n := len(p.sections)
-	if n == 0 {
+	if atxHeadingAny(line) {
+		p.closePara()
+		p.appendLine(line)
 		return
 	}
-	p.sections[n-1].lines = append(p.sections[n-1].lines, line)
-	// Пункт списка и строка таблицы занимают собственную строку законно;
-	// продолжение абзаца в пункте тоже не проверяется — граница сознательно
-	// узкая, чтобы не отвергать корректные списки.
-	if _, isItem := listItemContent(line); isItem || strings.HasPrefix(strings.TrimLeft(line, " \t"), "|") {
-		p.prevLen = 0
+	p.appendLine(line)
+	if p.listCol > 0 {
+		// Строка внутри списка — содержимое пункта, а не абзац обычного текста.
+		p.closePara()
 		return
 	}
-	// Жёсткий перенос — продолжение длинной строки абзаца на следующей строке.
-	// Короткая предыдущая строка означает отдельную строку, а не обёртку.
-	if p.prevLen >= hardWrapWidth {
-		p.sections[n-1].wrapped = true
+	p.textLine()
+}
+
+// appendLine добавляет видимую строку в текст текущего раздела; строки
+// преамбулы перед первым `##` содержанием раздела не являются.
+func (p *parser) appendLine(line string) {
+	if n := len(p.sections); n > 0 {
+		p.sections[n-1].lines = append(p.sections[n-1].lines, line)
 	}
-	p.prevLen = utf8.RuneCountInString(line)
 }
 
 // stripComments убирает HTML-комментарии, включая многострочные и незакрытые:
@@ -626,22 +721,22 @@ func leadingSpaces(line string) int {
 	return spaces
 }
 
-// listItemContent возвращает столбец начала содержимого пункта списка
-// одноуровневой разметки; второй результат — является ли строка таким пунктом.
-func listItemContent(line string) (int, bool) {
-	pad := leadingSpaces(line)
-	if pad > 3 {
-		return 0, false
+// leadColumns возвращает ширину ведущего отступа и позицию первого байта после
+// него. Табуляция считается равной четырём колонкам — так же, как в indentWidth,
+// поэтому отступ не зависит от того, набран он пробелами или табуляцией.
+func leadColumns(line string) (width, index int) {
+	for index < len(line) {
+		switch line[index] {
+		case ' ':
+			width++
+		case '\t':
+			width += 4
+		default:
+			return width, index
+		}
+		index++
 	}
-	marker := listMarkerLen(line[pad:])
-	if marker == 0 {
-		return 0, false
-	}
-	col := pad + marker
-	for col < len(line) && (line[col] == ' ' || line[col] == '\t') {
-		col++
-	}
-	return col, true
+	return width, index
 }
 
 // openFence распознаёт открывающий маркер ограждённого блока. Допустимый отступ
@@ -650,7 +745,7 @@ func listItemContent(line string) (int, bool) {
 // до трёх пробелов от listCol. Так же, как closesFence, отступ не может быть
 // абсолютным: при listCol = 4 строка с четырьмя пробелами — законное ограждение.
 func openFence(line string, listCol int) (fence, bool) {
-	pad := leadingSpaces(line)
+	pad, idx := leadColumns(line)
 	base := 0
 	if listCol > 0 && pad >= listCol {
 		base = listCol
@@ -658,7 +753,7 @@ func openFence(line string, listCol int) (fence, bool) {
 	if pad-base > 3 {
 		return fence{}, false
 	}
-	ch, length, ok := fenceMarker(line[pad:])
+	ch, length, ok := fenceMarker(line[idx:])
 	if !ok {
 		return fence{}, false
 	}
@@ -671,7 +766,7 @@ func openFence(line string, listCol int) (fence, bool) {
 // openListFence распознаёт ограждённый блок, начатый в той же строке, что и
 // пункт списка: GitHub считает такой блок кодом, а не разделом описания.
 func openListFence(line string) (fence, bool) {
-	col, ok := listItemContent(line)
+	col, ok := listItem(line, 0)
 	if !ok {
 		return fence{}, false
 	}
@@ -725,6 +820,164 @@ func closesFence(line string, active fence) bool {
 		return false
 	}
 	return strings.Trim(text[length:], " \t") == ""
+}
+
+// atxHeadingAny сообщает, что строка — заголовок ATX любого уровня от `#` до
+// `######` с обязательным пробельным символом после решёток. Такой заголовок
+// прерывает абзац, но разделом описания не становится.
+func atxHeadingAny(line string) bool {
+	pad := leadingSpaces(line)
+	if pad > 3 || pad == len(line) {
+		return false
+	}
+	text := line[pad:]
+	hashes := 0
+	for hashes < len(text) && text[hashes] == '#' {
+		hashes++
+	}
+	if hashes == 0 || hashes > 6 || hashes == len(text) {
+		return false
+	}
+	return text[hashes] == ' ' || text[hashes] == '\t'
+}
+
+// setextUnderline распознаёт подчёркивание заголовка: строка только из `=` или
+// только из `-` (с необязательным отступом до трёх пробелов). В GFM такая строка
+// превращает предыдущий абзац в заголовок, поэтому она прерывает абзац, но сама
+// его строкой не является.
+func setextUnderline(line string) bool {
+	pad := leadingSpaces(line)
+	if pad > 3 {
+		return false
+	}
+	text := strings.TrimRight(line[pad:], " \t")
+	if text == "" {
+		return false
+	}
+	ch := text[0]
+	if ch != '=' && ch != '-' {
+		return false
+	}
+	for i := 0; i < len(text); i++ {
+		if text[i] != ch {
+			return false
+		}
+	}
+	return true
+}
+
+// tableDelimiter распознаёт разделительную строку таблицы GFM: ячейки из `-` и
+// необязательного `:`, разделённые `|`. Внешние вертикальные черты не обязательны.
+func tableDelimiter(line string) bool {
+	text := strings.TrimSpace(line)
+	if text == "" || !strings.ContainsAny(text, "|-") {
+		return false
+	}
+	cells := splitTableCells(text)
+	if len(cells) == 0 {
+		return false
+	}
+	for _, cell := range cells {
+		cell = strings.TrimSpace(cell)
+		cell = strings.TrimPrefix(cell, ":")
+		cell = strings.TrimSuffix(cell, ":")
+		if cell == "" {
+			return false
+		}
+		for i := 0; i < len(cell); i++ {
+			if cell[i] != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// splitTableCells делит строку таблицы по неэкранированным `|` и отбрасывает
+// крайние пустые ячейки, которые появляются от внешних вертикальных черт.
+func splitTableCells(text string) []string {
+	var cells []string
+	var current strings.Builder
+	escaped := false
+	for i := 0; i < len(text); i++ {
+		switch ch := text[i]; {
+		case escaped:
+			current.WriteByte(ch)
+			escaped = false
+		case ch == '\\':
+			current.WriteByte(ch)
+			escaped = true
+		case ch == '|':
+			cells = append(cells, current.String())
+			current.Reset()
+		default:
+			current.WriteByte(ch)
+		}
+	}
+	cells = append(cells, current.String())
+	if len(cells) > 0 && strings.TrimSpace(cells[0]) == "" {
+		cells = cells[1:]
+	}
+	if len(cells) > 0 && strings.TrimSpace(cells[len(cells)-1]) == "" {
+		cells = cells[:len(cells)-1]
+	}
+	return cells
+}
+
+// hasUnescapedPipe сообщает, что строка содержит `|`, не экранированную обратным
+// слэшем: так выглядит строка таблицы GFM, в том числе без внешних черт.
+func hasUnescapedPipe(line string) bool {
+	escaped := false
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '\\':
+			escaped = !escaped
+		case '|':
+			if !escaped {
+				return true
+			}
+			escaped = false
+		default:
+			escaped = false
+		}
+	}
+	return false
+}
+
+// listItem распознаёт пункт списка любого уровня вложенности: отступ меньше
+// четырёх пробелов от начала содержимого текущего пункта считается новым блоком,
+// а не продолжением кода. Второй результат — является ли строка пунктом списка.
+func listItem(line string, parentCol int) (int, bool) {
+	pad := indentWidth(line)
+	base := parentCol
+	if pad < base {
+		base = 0
+	}
+	if pad > base+3 {
+		return 0, false
+	}
+	rest := line[leadingSpaces(line):]
+	marker := listMarkerLen(rest)
+	if marker == 0 {
+		return 0, false
+	}
+	col := pad + marker
+	for col < len(line) && (line[col] == ' ' || line[col] == '\t') {
+		col++
+	}
+	return col, true
+}
+
+// closeParaBeforeTableHeader отменяет абзац, который оказался заголовком
+// таблицы: разделительная строка доказывает, что единственная видимая строка
+// перед ней — шапка, а не текст абзаца.
+func (p *parser) closeParaBeforeTableHeader() {
+	if p.paraLines == 1 {
+		p.inPara = false
+		p.paraLines = 0
+		return
+	}
+	p.closePara()
 }
 
 // atxHeading распознаёт заголовок ровно второго уровня: отступ до трёх

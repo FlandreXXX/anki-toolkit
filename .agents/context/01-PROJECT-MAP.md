@@ -66,7 +66,7 @@ LICENSE                            # GNU AGPL v3
 │       ├── main.go
 │       └── main_test.go
 └── workflows/
-    └── pr-body.yml                # job `Структура PR`
+    └── pr-body.yml                # задача CI `Структура PR`
 ```
 
 Go-модуля в репозитории нет: ни `go.mod`, ни `go.sum`, ни каталогов пакетов.
@@ -82,8 +82,9 @@ Go-модуля в репозитории нет: ни `go.mod`, ни `go.sum`, 
 - [`.agents/context/INDEX.md`](INDEX.md) — маршрутизация к владельцам вопросов.
 - `.agents/skills/<name>/SKILL.md` — точка входа скилла: контракт, активация,
   границы; детали — в его `references/`.
-- `.github/workflows/pr-body.yml` — единственный workflow, хранящийся в репозитории;
-  внешние автоматические проверки могут запускаться отдельно.
+- `.github/workflows/pr-body.yml` — единственный рабочий процесс проверок,
+  хранящийся в репозитории; внешние автоматические проверки могут запускаться
+  отдельно.
 - `.github/scripts/*/main.go` — исполняемые проверки; `.github/scripts/*/main_test.go`
   — их собственные тесты.
 

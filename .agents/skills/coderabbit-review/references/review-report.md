@@ -200,7 +200,7 @@ mkdir -p "$task_root/reports" || exit 1
 snapshot_dir=$(mktemp -d "$task_root/reports/coderabbit-snapshot.XXXXXX") || exit 1
 
 # Репозиторий назначения берётся из ответа API о том же PR, а не из
-# head-репозитория: у PR из форка они разные.
+# репозитория head-ветки: у PR из форка они разные.
 destination=$(gh api --hostname github.com "repos/$repo/pulls/$number" --jq '.base.repo.full_name') || exit 1
 if [ "$destination" != "$repo" ]; then
   echo "Репозиторий назначения PR ($destination) не совпадает с ожидаемым ($repo)" >&2

@@ -31,7 +31,7 @@
 | [`review-report.md`](../skills/coderabbit-review/references/review-report.md) | формат, история и публикация накопительного комментария CodeRabbit |
 | [`pr-body-lint/main.go`](../../.github/scripts/pr-body-lint/main.go) | проверка структуры описания PR по снимку файла или события, без сети |
 | [`coderabbit-comment-lint/main.go`](../../.github/scripts/coderabbit-comment-lint/main.go) | чистая проверка Markdown накопительного отчёта и сверка опубликованных комментариев только на чтение |
-| [`pr-body.yml`](../../.github/workflows/pr-body.yml) | единственный workflow в репозитории: job `Структура PR`; внешние проверки определяются отдельно |
+| [`pr-body.yml`](../../.github/workflows/pr-body.yml) | единственный рабочий процесс проверок в репозитории: задача CI `Структура PR`; внешние проверки определяются отдельно |
 
 Содержание конкретной задачи определяется поручением. Ponytail остаётся внешним
 владельцем общей инженерной методологии и независимого ревью, но не источником
