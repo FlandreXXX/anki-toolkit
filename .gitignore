@@ -2,3 +2,6 @@
 /.agents/local/
 /anki-toolkit
 /anki-toolkit.exe
+
+# Пользовательские экспорты CrowdAnki.
+/decks/

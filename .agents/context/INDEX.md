@@ -21,6 +21,7 @@
 | [`03-VERIFICATION.md`](03-VERIFICATION.md) | фактические команды проверок, границы локальной, сетевой и CI-проверки |
 | [`README.md`](../../README.md) | сборка, запуск, пользовательский CLI и конфигурация |
 | [`docs/architecture.md`](../../docs/architecture.md) | границы приложения, машинный контракт и политика версии |
+| [`docs/crowdanki.md`](../../docs/crowdanki.md) | формат экспорта, сериализация, связи и файловый API CrowdAnki |
 | [`docs/threat-model.md`](../../docs/threat-model.md) | модель угроз, приватность и полномочия |
 | [`systematic-debugging/SKILL.md`](../skills/systematic-debugging/SKILL.md) | диагностика причин, остановка непродуктивного поиска и эскалация препятствий; Go-инструменты по необходимости |
 | [`go-best-practices/SKILL.md`](../skills/go-best-practices/SKILL.md) | Go-специфика качества кода, включая тестовый: идиомы языка, выбор решений и зависимостей, архитектура, надёжность и производительность |
