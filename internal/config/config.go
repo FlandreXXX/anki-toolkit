@@ -155,6 +155,11 @@ func absolute(path string) bool {
 }
 
 func readConfig(p Path) (string, error) {
+	// Некоторые специальные объекты нельзя открыть. Ошибки Stat не заменяют
+	// результат открытия, а тип успешно открытого объекта проверяется повторно.
+	if info, err := os.Stat(p.Value); err == nil && !info.Mode().IsRegular() {
+		return "", configTypeError(p)
+	}
 	file, err := openConfig(p.Value)
 	if err != nil {
 		switch {
@@ -189,7 +194,7 @@ func consumeConfig(file *os.File, p Path) (string, error) {
 		return "", configIO(p, err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", &Error{Source: p.Source, Message: "Конфигурация должна быть обычным файлом."}
+		return "", configTypeError(p)
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, maxFileSize+1))
 	if err != nil {
@@ -199,6 +204,10 @@ func consumeConfig(file *os.File, p Path) (string, error) {
 		return "", &Error{Source: p.Source, Message: "Размер файла конфигурации превышает 64 КиБ."}
 	}
 	return decodeConfig(raw, p.Source)
+}
+
+func configTypeError(p Path) *Error {
+	return &Error{Source: p.Source, Message: "Конфигурация должна быть обычным файлом."}
 }
 
 func configIO(p Path, err error) *Error {

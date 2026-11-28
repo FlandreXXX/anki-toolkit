@@ -13,7 +13,7 @@ import (
 // ERROR_SHARING_VIOLATION, поэтому сценарий не зависит от прав и uid.
 func readFailureCases(t *testing.T, base string) []readFailureCase {
 	t.Helper()
-	path := filepath.Join(base, "занятая конфигурация.json")
+	path := filepath.Join(base, privateMarker+"-занятая конфигурация.json")
 	if err := os.WriteFile(path, []byte(`{"schema_version":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}

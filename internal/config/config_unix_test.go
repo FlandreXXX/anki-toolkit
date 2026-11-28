@@ -3,7 +3,10 @@
 package config
 
 import (
+	"context"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -54,31 +57,57 @@ func TestConsumeConfigReadsOpenedObject(t *testing.T) {
 	}
 }
 
-// TestSpecialFileConfig проверяет отказ на специальном объекте, подменившем
-// обычный файл. Вызов ограничен по времени: ожидание на FIFO недопустимо.
-func TestSpecialFileConfig(t *testing.T) {
-	base := t.TempDir()
-	fifo := filepath.Join(base, "конфигурация.fifo")
+func TestSocketConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.sock")
+	socket, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := socket.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	_, err = readConfig(Path{path, "cli"})
+	assertConfigError(t, err, "cli", false)
+}
+
+func TestFIFOConfig(t *testing.T) {
+	const childFIFO = "ANKI_TOOLKIT_TEST_FIFO"
+	if fifo := os.Getenv(childFIFO); fifo != "" {
+		// Прямой вызов проверяет открытие при подмене пути после проверки типа.
+		path := Path{fifo, "cli"}
+		file, err := openConfig(fifo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		_, err = consumeConfig(file, path)
+		assertConfigError(t, err, "cli", false)
+		_, err = readConfig(path)
+		assertConfigError(t, err, "cli", false)
+		return
+	}
+
+	fifo := filepath.Join(t.TempDir(), "config.fifo")
 	if err := syscall.Mkfifo(fifo, 0600); err != nil {
 		t.Fatal(err)
 	}
-	type outcome struct {
-		data string
-		err  error
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
-	done := make(chan outcome, 1)
-	go func() {
-		data, err := readConfig(Path{fifo, "cli"})
-		done <- outcome{data, err}
-	}()
-	select {
-	case got := <-done:
-		if got.data != "" || got.err == nil {
-			t.Fatalf("Специальный объект принят: %q, %v", got.data, got.err)
-		}
-		assertConfigError(t, got.err, "cli", false)
-	case <-time.After(10 * time.Second):
-		t.Fatal("Открытие FIFO заблокировалось")
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestFIFOConfig$")
+	cmd.Env = append(cmd.Environ(), childFIFO+"="+fifo)
+	// При таймауте CommandContext завершает процесс, а CombinedOutput ждёт его выхода.
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("Проверка FIFO превысила таймаут, дочерний процесс завершён: %v\n%s", err, output)
+	}
+	if err != nil {
+		t.Fatalf("Проверка FIFO в дочернем процессе: %v\n%s", err, output)
 	}
 }
 

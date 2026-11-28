@@ -108,13 +108,13 @@ func TestExecutable(t *testing.T) {
 	defaults := platformDefaults(home)
 	config := filepath.Join(home, "мои настройки.json")
 	dashedConfig := filepath.Join(home, "--ведущие-дефисы.json")
-	badConfig := filepath.Join(home, privateMarker+".json")
+	badConfig := filepath.Join(home, privateMarker+"-config.json")
 	fileDataDir := filepath.Join(home, privateMarker+"-file-data")
 	dataDir := filepath.Join(home, privateMarker+"-data")
 	for path, data := range map[string]string{
 		config:       `{"schema_version":1}`,
 		dashedConfig: `{"schema_version":1}`,
-		badConfig:    `{"schema_version":1,"` + privateMarker + `":true}`,
+		badConfig:    `{"schema_version":1,"` + privateMarker + `-field":true}`,
 	} {
 		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 			t.Fatal(err)
@@ -201,7 +201,7 @@ func TestExecutable(t *testing.T) {
 		{name: "пустой путь", args: []string{"--json", "--data-dir=", "doctor"}, exit: 2, machine: true, operation: "doctor", code: "invalid_arguments"},
 		{name: "параметр после команды", args: []string{"--json", "doctor", "--verbose"}, exit: 2, machine: true, operation: "doctor", code: "invalid_arguments"},
 		{
-			name: "относительный каталог данных", args: []string{"--json", "--verbose", "--data-dir=relative", "doctor"},
+			name: "относительный каталог данных", args: []string{"--json", "--verbose", "--data-dir=" + privateMarker + "-relative", "doctor"},
 			exit: 2, machine: true, operation: "doctor", code: "invalid_configuration", source: new("cli"),
 			verbose: true, text: "абсолютного пути",
 		},
@@ -219,7 +219,9 @@ func TestExecutable(t *testing.T) {
 	if len(failures) == 0 {
 		t.Fatal("Набор системных отказов чтения пуст: сценарий configuration_io обязателен.")
 	}
+	privateValues := append(slices.Clone(privateEvidence), home, blocked)
 	for _, failure := range failures {
+		privateValues = append(privateValues, failure.config, filepath.Base(failure.config))
 		tests = append(tests,
 			scenario{
 				name: failure.name + ": машинный отказ",
@@ -250,13 +252,13 @@ func TestExecutable(t *testing.T) {
 			if err == nil && test.exit != 0 {
 				t.Fatalf("Ожидался код %d, stdout %q, stderr %q", test.exit, &stdout, &stderr)
 			}
-			checkStreams(t, stdout.String(), stderr.String(), test.exit != 0, []string{home, blocked})
+			checkStreams(t, stdout.String(), stderr.String(), test.exit != 0, privateValues)
 			switch {
 			case test.machine:
 				if !test.verbose && stderr.Len() != 0 {
 					t.Fatalf("Машинный режим без --verbose не должен писать в stderr: %q", &stderr)
 				}
-				checkJSON(t, readDocument(t, &stdout), test)
+				checkJSON(t, readDocument(t, &stdout), test, privateValues)
 			case test.exit != 0:
 				if stdout.Len() != 0 || !strings.Contains(stderr.String(), test.text) {
 					t.Fatalf("Неверный текстовый отказ: stdout %q, stderr %q", &stdout, &stderr)
@@ -270,7 +272,7 @@ func TestExecutable(t *testing.T) {
 				}
 			}
 			if test.verbose {
-				checkDiagnostic(t, stderr.String(), test)
+				checkDiagnostic(t, stderr.String(), test, privateValues)
 			}
 		})
 	}
@@ -334,7 +336,7 @@ func readDocument(t *testing.T, reader io.Reader) []byte {
 // checkJSON сверяет машинный ответ с ожиданиями сценария. Наличие ключей
 // проверяется по карте, значения — по указателям: отсутствие обязательного
 // поля ломает тест.
-func checkJSON(t *testing.T, document []byte, want scenario) {
+func checkJSON(t *testing.T, document []byte, want scenario, privateValues []string) {
 	t.Helper()
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(document, &fields); err != nil {
@@ -369,6 +371,17 @@ func checkJSON(t *testing.T, document []byte, want scenario) {
 			t.Fatalf("Сценарий не описывает ожидаемый результат: %s", document)
 		}
 		return
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(document))
+	dec.UseNumber()
+	for token, err := dec.Token(); err != io.EOF; token, err = dec.Token() {
+		if err != nil {
+			t.Fatalf("Не удалось разобрать значения машинной ошибки: %v", err)
+		}
+		if value, ok := token.(string); ok {
+			checkPrivateValue(t, "машинной ошибке", value, privateValues)
+		}
 	}
 
 	if status != "error" {
@@ -488,22 +501,20 @@ func checkPath(t *testing.T, name string, got *pathReport, want pathExpectation)
 
 // checkStreams проверяет, что приватные данные и сырые системные ошибки
 // не попали в потоки процесса. stdout успешной операции содержит пути по контракту.
-func checkStreams(t *testing.T, stdout, stderr string, failed bool, roots []string) {
+func checkStreams(t *testing.T, stdout, stderr string, failed bool, privateValues []string) {
 	t.Helper()
-	streams := []struct{ name, content string }{{"stderr", stderr}}
+	checkPrivateValue(t, "stderr", stderr, privateValues)
 	if failed {
-		streams = append(streams, struct{ name, content string }{"stdout", stdout})
+		checkPrivateValue(t, "stdout", stdout, privateValues)
 	}
-	for _, stream := range streams {
-		for _, evidence := range privateEvidence {
-			if strings.Contains(stream.content, evidence) {
-				t.Errorf("Приватные данные %q попали в %s: %q", evidence, stream.name, stream.content)
-			}
-		}
-		for _, root := range roots {
-			if strings.Contains(stream.content, root) {
-				t.Errorf("Путь %q попал в %s: %q", root, stream.name, stream.content)
-			}
+}
+
+func checkPrivateValue(t *testing.T, location, value string, privateValues []string) {
+	t.Helper()
+	for _, private := range privateValues {
+		if strings.Contains(value, private) {
+			t.Errorf("Приватные данные %q обнаружены в %s: %q", private, location, value)
+			return
 		}
 	}
 }
@@ -532,9 +543,9 @@ func attributes(line string) (map[string]string, bool) {
 	return attrs, true
 }
 
-// checkDiagnostic проверяет смысл полей расширенной диагностики, а не подстроку
-// всего потока. Timestamp, порядок атрибутов и формат slog не фиксируются.
-func checkDiagnostic(t *testing.T, stderr string, want scenario) {
+// checkDiagnostic проверяет значения полей расширенной диагностики независимо
+// от метки времени, порядка атрибутов и форматирования записи slog.
+func checkDiagnostic(t *testing.T, stderr string, want scenario, privateValues []string) {
 	t.Helper()
 	var records []map[string]string
 	lines := 0
@@ -558,10 +569,11 @@ func checkDiagnostic(t *testing.T, stderr string, want scenario) {
 		t.Fatalf("Ожидалась одна запись диагностики, получено %d: %q", len(records), stderr)
 	}
 	record := records[0]
-	for key := range record {
+	for key, value := range record {
 		if !diagnosticKeys[key] {
 			t.Fatalf("Неожиданное поле %q в диагностике: %q", key, stderr)
 		}
+		checkPrivateValue(t, "атрибуте диагностики "+key, value, privateValues)
 	}
 	if record["operation"] != want.operation {
 		t.Fatalf("operation=%q, ожидалось %q", record["operation"], want.operation)
