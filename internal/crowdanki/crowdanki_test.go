@@ -81,6 +81,19 @@ func textValue(t *testing.T, v ca.Value, want string) {
 	}
 }
 
+func textValues(t *testing.T, list ca.List[ca.Value]) string {
+	t.Helper()
+	var parts []string
+	for _, v := range list.All {
+		s, ok := v.String()
+		if !ok {
+			t.Fatalf("элемент не строка: %v", v.Kind())
+		}
+		parts = append(parts, s)
+	}
+	return strings.Join(parts, ",")
+}
+
 func TestModelAndResolution(t *testing.T) {
 	doc := parse(t, fixture)
 	root := doc.Root()
@@ -152,8 +165,8 @@ func TestModelAndResolution(t *testing.T) {
 	if first.Description().Kind() != jsontext.KindNull {
 		t.Fatal("потеряно явное null")
 	}
-	for _, tag := range note.Tags().All {
-		textValue(t, tag, "  Тег ")
+	if got := textValues(t, note.Tags()); got != "  Тег ,  Тег " {
+		t.Fatalf("теги: %q", got)
 	}
 	config, err := doc.ResolveConfig(root)
 	if err != nil {
@@ -164,8 +177,8 @@ func TestModelAndResolution(t *testing.T) {
 		t.Fatal("изменены параметры планировщика")
 	}
 	textValue(t, root.Property("Notes"), "регистр")
-	for _, m := range root.Media().All {
-		textValue(t, m, "root.png")
+	if got := textValues(t, root.Media()); got != "root.png,root.png" {
+		t.Fatalf("медиа корня: %q", got)
 	}
 	leaf, _ := child.Entity.Children().At(0)
 	media, _ := leaf.Media().At(0)
@@ -352,6 +365,19 @@ func TestStrictParse(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLimitChargesOnlyStartedEntry(t *testing.T) {
+	// Оборванный элемент не должен превращать syntax в limit: бюджет
+	// списывается только за подтверждённое начало.
+	_, err := ca.Parse(context.Background(), strings.NewReader(`{"__type__":"Deck","notes":[true`), ca.Limits{MaxEntries: 3})
+	requireCode(t, err, ca.Syntax)
+	doc, err := ca.Parse(context.Background(), strings.NewReader(`{"__type__":"Deck","notes":[true]}`), ca.Limits{MaxEntries: 3})
+	if err != nil || doc.Root().Notes().Len() != 1 {
+		t.Fatalf("граница бюджета: %v", err)
+	}
+	_, err = ca.Parse(context.Background(), strings.NewReader(`{"__type__":"Deck","notes":[true,true]}`), ca.Limits{MaxEntries: 3})
+	requireCode(t, err, ca.Limit)
 }
 
 func TestLimitsAndReader(t *testing.T) {

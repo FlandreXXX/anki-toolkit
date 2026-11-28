@@ -107,17 +107,25 @@ func compareDefinitions[T entity](ctx context.Context, dir directory[T]) {
 		if len(g.all) < 2 {
 			continue
 		}
-		first, ok := comparableJSON(g.all[0].Entity.Value())
-		if !ok {
-			continue
-		}
+		first := g.all[0].Entity.Value().Raw()
+		var canonical jsontext.Value
 		g.equivalent = true
 		for _, found := range g.all[1:] {
 			if ctx.Err() != nil {
 				return
 			}
-			raw, ok := comparableJSON(found.Entity.Value())
-			if !ok || !bytes.Equal(first, raw) {
+			other := found.Entity.Value().Raw()
+			// Совпавшие байты равны и без переупорядочивания, а это
+			// обычный случай одинаковых объявлений в дереве.
+			if bytes.Equal(first, other) {
+				continue
+			}
+			if canonical == nil && !format(&canonical, first) {
+				g.equivalent = false
+				break
+			}
+			var candidate jsontext.Value
+			if !format(&candidate, other) || !bytes.Equal(canonical, candidate) {
 				g.equivalent = false
 				break
 			}
@@ -126,10 +134,13 @@ func compareDefinitions[T entity](ctx context.Context, dir directory[T]) {
 	}
 }
 
-func comparableJSON(v Value) (jsontext.Value, bool) {
-	raw := jsontext.Value(v.Raw())
-	err := raw.Format(jsontext.ReorderRawObjects(true), jsontext.PreserveRawStrings(false))
-	return raw, err == nil
+// format приводит значение к сравнимому виду: порядок ключей объектов и
+// форматирование не значимы, порядок массивов и числовые лексемы значимы.
+// ponytail: jsontext.Format не наблюдает отмену во время копирования тел
+// вложенных объектов; предел глубины и записей ограничивает объём работы.
+func format(dst *jsontext.Value, raw []byte) bool {
+	*dst = append((*dst)[:0], raw...)
+	return dst.Format(jsontext.ReorderRawObjects(true), jsontext.PreserveRawStrings(false)) == nil
 }
 
 func identity(v Value, uuid bool) (string, Code) {

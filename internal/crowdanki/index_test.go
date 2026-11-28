@@ -21,7 +21,7 @@ func TestDefinitionDeclarations(t *testing.T) {
 		{"неизвестное значение поля", strings.Replace(same, "1.00", "1.01", 1), sameConfig, ca.Ambiguous, ""},
 		{"числовая лексема", strings.Replace(same, "1.00", "1", 1), sameConfig, ca.Ambiguous, ""},
 		{"порядок массива планировщика", same, strings.Replace(sameConfig, "[1,2]", "[2,1]", 1), "", ca.Ambiguous},
-		{"отсутствие против null", same, strings.Replace(sameConfig, `"ignored":false,`, `"new_key":null,`, 1), "", ca.Ambiguous},
+		{"отсутствие против null", same, strings.Replace(sameConfig, `"ignored":false,`, `"ignored":false,"new_key":null,`, 1), "", ca.Ambiguous},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			doc := parse(t, fmt.Sprintf(`{

@@ -25,16 +25,19 @@ func openRegular(dir string) (*os.File, error) {
 	} else if strings.HasPrefix(volume, `\\?\`) && (len(volume) != 6 || volume[5] != ':') {
 		return nil, errWrongType
 	}
-	// Проверка метаданных и открытие получают одну и ту же строку: иначе
-	// Win32 нормализует имя при проверке и не нормализует при открытии.
-	info, err := os.Stat(forOpen(dirPath))
+	// Проверки и открытие идут по одной строке: иначе Win32 нормализует имя
+	// на одном шаге и не нормализует на другом.
+	path, err := forOpen(path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(parent(path))
 	if err != nil {
 		return nil, err
 	}
 	if !info.IsDir() {
 		return nil, errWrongType
 	}
-	path = forOpen(path)
 	info, err = os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -54,18 +57,31 @@ func openRegular(dir string) (*os.File, error) {
 	return file, nil
 }
 
-// forOpen выбирает extended-length форму только там, где без неё не работает
-// низкоуровневый вызов: у префикса отключена нормализация Win32, поэтому
-// короткий путь передаётся как есть.
-func forOpen(path string) string {
+// parent отрезает имя файла, не трогая остальное.
+func parent(path string) string {
+	if i := strings.LastIndexByte(path, '\\'); i > 0 {
+		return path[:i]
+	}
+	return path
+}
+
+// forOpen переводит путь в форму, которой нужен extended-length префикс, только
+// для длинных путей. У префикса отключена нормализация Win32, поэтому перед ним
+// путь разрешается — иначе `..` после ссылки дал бы другой каталог, чем при
+// проверке.
+func forOpen(path string) (string, error) {
 	switch {
 	case strings.HasPrefix(path, `\\?\`), strings.HasPrefix(path, `\??\`), len(path) < 248:
-		return path
-	case strings.HasPrefix(path, `\\`):
-		return `\\?\UNC\` + path[2:]
-	default:
-		return `\\?\` + path
+		return path, nil
 	}
+	full, err := syscall.FullPath(path)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(full, `\\`) {
+		return `\\?\UNC\` + full[2:], nil
+	}
+	return `\\?\` + full, nil
 }
 
 func checkHandle(fd syscall.Handle) error {

@@ -216,8 +216,16 @@ func (p *parser) parseValue(s shape) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
+	return p.value(s, tok, before)
+}
+
+// value достраивает значение, первый токен которого уже прочитан. Разделение
+// позволяет списать бюджет только после подтверждённого начала элемента:
+// оборванный поток даёт syntax, а не limit.
+func (p *parser) value(s shape, tok jsontext.Token, before int64) (Value, error) {
 	start := p.start(before)
 	v := Value{offset: start}
+	var err error
 	switch {
 	case tok.Kind() == jsontext.KindBeginObject && s > shapeRaw && s < shapeArray:
 		v.object, err = p.parseObject(s)
@@ -266,10 +274,17 @@ func (p *parser) parseObject(s shape) (*object, error) {
 func (p *parser) parseArray(element shape) ([]Value, error) {
 	items := make([]Value, 0)
 	for p.dec.PeekKind() != jsontext.KindEndArray {
+		before := p.dec.InputOffset()
+		tok, err := p.required()
+		if err != nil {
+			return nil, err
+		}
+		// Бюджет списывается за подтверждённый элемент, а не за
+		// непрочитанный токен: оборванный ввод даёт syntax, не limit.
 		if err := p.entry(); err != nil {
 			return nil, err
 		}
-		v, err := p.parseValue(element)
+		v, err := p.value(element, tok, before)
 		if err != nil {
 			return nil, err
 		}
