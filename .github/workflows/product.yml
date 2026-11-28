@@ -1,0 +1,63 @@
+name: Anki Toolkit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Anki Toolkit (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Получить код
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Установить Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Статическая проверка
+        run: go vet ./...
+
+      - name: Тесты
+        run: go test -count=1 ./...
+
+      - name: Сборка и запуск
+        shell: pwsh
+        run: |
+          $scratch = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString())
+          New-Item -ItemType Directory -Path $scratch | Out-Null
+          $exe = Join-Path $scratch $(if ($IsWindows) { 'anki-toolkit.exe' } else { 'anki-toolkit' })
+          go build -o $exe ./cmd/anki-toolkit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $help = & $exe --help
+          if ($LASTEXITCODE -ne 0 -or ($help -join "`n") -notmatch 'doctor') { exit 1 }
+          $version = & $exe --version
+          if ($LASTEXITCODE -ne 0 -or -not $version) { exit 1 }
+
+          $config = Join-Path $scratch 'config.json'
+          Set-Content -LiteralPath $config -Value '{"schema_version":1}' -Encoding utf8NoBOM
+          $env:HOME = $env:APPDATA = $env:LOCALAPPDATA = $scratch
+          Remove-Item Env:XDG_CONFIG_HOME, Env:XDG_DATA_HOME, Env:XDG_CACHE_HOME, Env:XDG_STATE_HOME, Env:ANKI_TOOLKIT_CONFIG, Env:ANKI_TOOLKIT_DATA_DIR -ErrorAction SilentlyContinue
+          $raw = & $exe --json --config $config doctor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = $raw | ConvertFrom-Json
+          $expectedOS = if ($IsWindows) { 'windows' } else { 'linux' }
+          if ($report.schema_version -ne 1 -or $report.status -ne 'ok' -or
+              $report.operation -ne 'doctor' -or $report.result.os -ne $expectedOS -or
+              $report.result.arch -ne 'amd64' -or $report.result.go_version -ne (go env GOVERSION) -or
+              $report.result.version -ne $version -or $report.result.config_file.status -ne 'present' -or
+              $report.result.data_dir.status -ne 'missing') { exit 1 }
