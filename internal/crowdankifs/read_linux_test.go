@@ -1,6 +1,7 @@
 package crowdankifs_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -18,6 +19,36 @@ import (
 func skipSymlink(t *testing.T, err error) {
 	t.Helper()
 	t.Fatal(err)
+}
+
+func TestReadResolvesDotDotAfterSymlink(t *testing.T) {
+	base := t.TempDir()
+	group := filepath.Join(base, "group", "deck")
+	work := filepath.Join(base, "work")
+	marker := []byte(`  {"__type__":"Deck","name":"group"}` + "\n")
+	for _, dir := range []string{group, work} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(base, "group", "deck.json"), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "deck.json"), []byte(export), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(group, filepath.Join(work, "link")); err != nil {
+		skipSymlink(t, err)
+	}
+	// ОС разрешает `..` после символической ссылки и уходит в /base/group;
+	// лексическая нормализация вернула бы /base/work, то есть другой экспорт.
+	doc, err := cafs.Read(context.Background(), filepath.Join(work, "link")+"/..", ca.Limits{})
+	if err != nil {
+		t.Fatalf("чтение: %v", err)
+	}
+	if !bytes.Equal(doc.Original(), marker) {
+		t.Fatalf("прочитан другой экспорт: %s", doc.Original())
+	}
 }
 
 func TestRejectSpecialFiles(t *testing.T) {

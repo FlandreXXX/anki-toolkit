@@ -8,7 +8,9 @@ import (
 )
 
 func openRegular(dir string) (*os.File, error) {
-	path := strings.ReplaceAll(filepath.Join(dir, deckJSON), "/", "\\")
+	// Соединение без Clean: `..` разрешает ОС, в том числе после ссылки.
+	dirPath := strings.ReplaceAll(strings.TrimRight(dir, `\/`), "/", "\\")
+	path := dirPath + `\` + deckJSON
 	if strings.HasPrefix(path, `\\.\`) {
 		return nil, errWrongType
 	}
@@ -23,27 +25,22 @@ func openRegular(dir string) (*os.File, error) {
 	} else if strings.HasPrefix(volume, `\\?\`) && (len(volume) != 6 || volume[5] != ':') {
 		return nil, errWrongType
 	}
-	info, err := os.Stat(dir)
+	// Проверка метаданных и открытие получают одну и ту же строку: иначе
+	// Win32 нормализует имя при проверке и не нормализует при открытии.
+	info, err := os.Stat(forOpen(dirPath))
 	if err != nil {
 		return nil, err
 	}
 	if !info.IsDir() {
 		return nil, errWrongType
 	}
+	path = forOpen(path)
 	info, err = os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
 		return nil, errWrongType
-	}
-	// Префикс сохраняет поддержку длинных путей для низкоуровневого API.
-	switch {
-	case strings.HasPrefix(path, `\\?\`):
-	case strings.HasPrefix(path, `\\`):
-		path = `\\?\UNC\` + path[2:]
-	default:
-		path = `\\?\` + path
 	}
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
@@ -55,6 +52,20 @@ func openRegular(dir string) (*os.File, error) {
 		return nil, err
 	}
 	return file, nil
+}
+
+// forOpen выбирает extended-length форму только там, где без неё не работает
+// низкоуровневый вызов: у префикса отключена нормализация Win32, поэтому
+// короткий путь передаётся как есть.
+func forOpen(path string) string {
+	switch {
+	case strings.HasPrefix(path, `\\?\`), strings.HasPrefix(path, `\??\`), len(path) < 248:
+		return path
+	case strings.HasPrefix(path, `\\`):
+		return `\\?\UNC\` + path[2:]
+	default:
+		return `\\?\` + path
+	}
 }
 
 func checkHandle(fd syscall.Handle) error {

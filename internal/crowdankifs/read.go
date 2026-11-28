@@ -44,7 +44,9 @@ func Read(ctx context.Context, dir string, limits crowdanki.Limits) (*crowdanki.
 	if !filepath.IsAbs(dir) {
 		return nil, &Error{Code: DirectoryRequired}
 	}
-	file, err := openRegular(filepath.Clean(dir))
+	// Путь передаётся как есть: filepath.Clean разрешает `..` лексически,
+	// а ОС — после символических ссылок, и результат расходится.
+	file, err := openRegular(dir)
 	if err != nil {
 		code := Unavailable
 		switch {
