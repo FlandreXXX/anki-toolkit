@@ -19,7 +19,7 @@
 | `go version`, `go env GOTOOLCHAIN GOROOT GOVERSION` | Фактический инструментарий Go в рабочей копии. |
 | `gofmt -l cmd internal` | Форматирование исходников и тестов продукта. |
 | `go vet ./...` | Статическая проверка продуктовых пакетов. |
-| `go test -count=1 ./...` | Приоритеты и строгий разбор конфигурации, платформенные пути, прикладные операции, CLI и запуск собранного бинарника. Процесс получает синтетическое окружение и временные каталоги, снимки сравниваются до и после вызовов. |
+| `go test -count=1 ./...` | Приоритеты и строгий разбор конфигурации, платформенные пути, прикладные операции, CLI, запуск собранного бинарника, разбор и сериализация CrowdAnki, связи и файловая граница. Процесс получает синтетическое окружение и временные каталоги, снимки сравниваются до и после вызовов. |
 | `go test -race -count=1 ./...` | Тот же набор с детектором гонок данных при доступном нативном CGO и C-компиляторе. |
 | `go build ./...` | Сборка пакетов продукта. |
 | `go mod tidy`, `go list -m -u -json all` | Согласованность модуля и разрешённый граф зависимостей. |
@@ -44,11 +44,22 @@
 ```bash
 GOOS=windows GOARCH=amd64 go test -c -o /dev/null ./cmd/anki-toolkit/
 GOOS=windows GOARCH=amd64 go test -c -o /dev/null ./internal/config/
+GOOS=windows GOARCH=amd64 go test -c -o /dev/null ./internal/crowdankifs/
 ```
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$tmp/anki-toolkit-linux-amd64" ./cmd/anki-toolkit
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o "$tmp/anki-toolkit-windows-amd64.exe" ./cmd/anki-toolkit
+```
+
+### CrowdAnki
+
+`go test -count=1 ./internal/crowdanki ./internal/crowdankifs` проверяет полный JSON независимо через `encoding/json` с `UseNumber`, владение буферами, связи и отказы на синтетических экспортах. Файловые тесты используют `t.TempDir()` и проверяют отсутствие записи. Проверки специальных объектов на Linux ограничены временем дочернего процесса. На Windows проверка ссылок требует права их создания.
+
+Ограниченный фаззинг чистого парсера:
+
+```bash
+go test -run='^$' -fuzz='^FuzzParse$' -fuzztime=15s -parallel=2 ./internal/crowdanki
 ```
 
 ## `pr-body-lint`
