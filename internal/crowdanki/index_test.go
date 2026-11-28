@@ -87,6 +87,7 @@ func TestBrokenRelations(t *testing.T) {
 		{"отрицательный ord", `[{"name":"A","ord":-1}]`, validValue, validRef, ca.Invalid},
 		{"дробный ord", `[{"name":"A","ord":0.1}]`, validValue, validRef, ca.Invalid},
 		{"переполнение ord", `[{"name":"A","ord":9223372036854775808}]`, validValue, validRef, ca.Invalid},
+		{"ord за диапазоном int32", `[{"name":"A","ord":2147483648}]`, validValue, validRef, ca.Invalid},
 		{"ord за границей", `[{"name":"A","ord":1}]`, validValue, validRef, ca.Invalid},
 		{"ord отсутствует", `[{"name":"A"}]`, validValue, validRef, ca.Invalid},
 		{"ord строка", `[{"name":"A","ord":"0"}]`, validValue, validRef, ca.Invalid},

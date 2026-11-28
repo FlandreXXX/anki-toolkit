@@ -3,6 +3,7 @@ package crowdanki
 import (
 	"context"
 	"encoding/json/jsontext"
+	"strconv"
 )
 
 type fieldLayout struct {
@@ -25,16 +26,16 @@ func layout(ctx context.Context, model NoteModel) fieldLayout {
 		if ctx.Err() != nil {
 			break
 		}
-		n, ordOK := field.Ord().Integer()
+		n, err := strconv.Atoi(string(field.Ord().raw))
 		name, nameOK := field.Name().String()
-		if !ordOK || n < 0 || n >= int64(fields.Len()) || !nameOK {
+		if err != nil || n < 0 || n >= fields.Len() || !nameOK {
 			return fieldLayout{code: Invalid, offset: field.Value().Offset()}
 		}
 		if _, exists := l.byName[name]; exists || l.ordered[n].Value().object != nil {
 			return fieldLayout{code: Ambiguous, offset: field.Value().Offset()}
 		}
 		l.ordered[n] = field
-		l.byName[name] = int(n)
+		l.byName[name] = n
 	}
 	return l
 }
